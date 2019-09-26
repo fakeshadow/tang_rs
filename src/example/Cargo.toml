@@ -1,0 +1,20 @@
+[package]
+name = "tang-example"
+version = "0.1.0"
+authors = ["fakeshadow <24548779@qq.com>"]
+edition = "2018"
+
+[dependencies.futures-preview]
+version = "0.3.0-alpha.18"
+features = [ "nightly", "async-await" ]
+
+[dependencies.tokio]
+version = "0.2.0-alpha.5"
+default-features = false
+features = [ "io", "codec", "fs" ]
+
+[dependencies.tokio-postgres]
+git = "https://github.com/sfackler/rust-postgres"
+
+[dependencies.tang]
+path = "../../"

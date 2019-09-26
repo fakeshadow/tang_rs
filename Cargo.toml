@@ -1,0 +1,28 @@
+[package]
+name = "tang"
+version = "0.1.0"
+authors = ["fakeshadow <24548779@qq.com>"]
+edition = "2018"
+description = "A tokio-postgres Connection pool"
+keywords = ["database", "async", "tokio-postgres"]
+license = "MIT"
+exclude = ["example/*"]
+repository = "https://github.com/fakeshadow/tang_rs"
+readme= "README.md"
+
+[lib]
+name = "tang_rs"
+path = "src/lib.rs"
+
+[dependencies.futures-preview]
+version = "0.3.0-alpha.18"
+features = [ "nightly", "compat", "async-await" ]
+
+[dependencies.tokio-executor]
+version = "=0.2.0-alpha.5"
+
+[dependencies.tokio-timer]
+version = "=0.3.0-alpha.5"
+
+[dependencies.tokio-postgres]
+git = "https://github.com/sfackler/rust-postgres"
