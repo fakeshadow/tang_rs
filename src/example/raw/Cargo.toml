@@ -1,5 +1,5 @@
 [package]
-name = "tang-example"
+name = "tang-example-raw"
 version = "0.1.0"
 authors = ["fakeshadow <24548779@qq.com>"]
 edition = "2018"
@@ -16,5 +16,5 @@ features = [ "io", "codec", "fs" ]
 [dependencies.tokio-postgres]
 git = "https://github.com/sfackler/rust-postgres"
 
-[dependencies.tang]
-path = "../../"
+[dependencies.tang-rs]
+path = "../../../"

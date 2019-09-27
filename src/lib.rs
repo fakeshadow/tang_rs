@@ -1,18 +1,26 @@
+#![feature(no_more_cas)]
+
 use std::cmp::{max, min};
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use futures::lock::{MutexGuard, MutexLockFuture};
-use futures::{lock::Mutex, FutureExt, Stream, StreamExt};
+use futures::{
+    lock::{Mutex, MutexGuard, MutexLockFuture},
+    FutureExt, Stream, StreamExt,
+};
 use tokio_executor::spawn;
-use tokio_postgres::tls::TlsConnect;
-use tokio_postgres::{tls::MakeTlsConnect, types::Type, Client, Error, Socket, Statement};
-use tokio_timer::Interval;
+use tokio_postgres::{
+    tls::{MakeTlsConnect, TlsConnect},
+    types::Type,
+    Client, Error, Socket, Statement,
+};
+use tokio_timer::{Interval, Timeout};
 
 pub use error::PoolError;
 pub use postgres::PostgresConnectionManager;
@@ -20,6 +28,8 @@ use postgres::PreparedStatement;
 
 mod error;
 mod postgres;
+
+const LOOP_DELAY: Duration = Duration::from_millis(2);
 
 /// Conn type contains connection itself and prepared statements for this connection.
 pub struct Conn {
@@ -68,11 +78,11 @@ impl Default for Builder {
     fn default() -> Self {
         Builder {
             max_size: 10,
-            min_idle: 0,
+            min_idle: 1,
             always_check: true,
             max_lifetime: Some(Duration::from_secs(30 * 60)),
             idle_timeout: Some(Duration::from_secs(10 * 60)),
-            connection_timeout: Duration::from_secs(30),
+            connection_timeout: Duration::from_secs(10),
             reaper_rate: Duration::from_secs(30),
             statements: vec![],
         }
@@ -152,7 +162,7 @@ impl Builder {
     /// ];
     /// let builder = crate::Builder::new().prepare_statements(statements);
     /// ```
-    pub fn prepare_statements(mut self, statements: Vec<(&str, Vec<Type>)>) -> Builder {
+    pub fn prepare_statements(mut self, statements: Vec<(&str, Vec<Type>)>) -> Self {
         let statements = statements
             .into_iter()
             .map(|p| p.into())
@@ -203,6 +213,7 @@ struct SharedPool<Tls: MakeTlsConnect<Socket>> {
     statics: Builder,
     manager: PostgresConnectionManager<Tls>,
     pool: Mutex<PoolInner>,
+    counter: AtomicUsize,
 }
 
 pub struct Pool<Tls: MakeTlsConnect<Socket>> {
@@ -241,32 +252,36 @@ where
             statics: builder,
             manager,
             pool: Mutex::new(inner),
+            counter: AtomicUsize::new(0),
         });
 
         // spawn a loop interval future to handle the lifetime and time out of connections.
-        if shared.statics.max_lifetime.is_some() || shared.statics.idle_timeout.is_some() {
+        if (shared.statics.max_lifetime.is_some() || shared.statics.idle_timeout.is_some())
+            && shared.statics.min_idle < shared.statics.max_size
+        {
             let interval = Interval::new_interval(shared.statics.reaper_rate);
             let weak_shared = Arc::downgrade(&shared);
 
-            // ToDo: in case spawn error then change to lazy.
             schedule_one_reaping(interval, weak_shared);
         }
 
         Pool { inner: shared }
     }
 
-    // ToDo: replenish connection is blocking for now.
     async fn replenish_idle_connections_locked(
         pool: &Arc<SharedPool<Tls>>,
         inner: &mut PoolInner,
     ) -> Result<(), Error> {
         let slots_available = pool.statics.max_size - inner.num_conns - inner.pending_conns;
+
         let idle = inner.conns.len() as u32;
         let desired = pool.statics.min_idle;
 
-        for _i in idle..max(idle, min(desired, idle + slots_available)) {
-            add_connection(pool, inner).await?;
+        for _i in idle..max(idle + 1, min(desired, slots_available)) {
+            println!("spawning");
+            let _ = add_connection(pool, inner).await;
         }
+
         Ok(())
     }
 
@@ -282,22 +297,25 @@ where
     pub async fn run<T, E, F, Fut>(&self, f: F) -> Result<T, PoolError<E>>
     where
         // ToDo: possible take in Statements as Option
-        // we take advantage of async/await and pass mut reference to closure.
-        // this could be a limitation to the future's lifetime in closure.
+        // ToDo: we could take advantage of async/await and pass mut reference to closure.
+        // this can't be done now as the compiler in latest nightly build have a bug related to a Sync bound requirement for ToSql trait.
         F: FnOnce(Conn) -> Fut,
         Fut: Future<Output = Result<(T, Conn), E>> + Send + 'static,
         PoolError<E>: From<Error>,
         T: Send + 'static,
     {
         let inner = self.inner.clone();
-        // ToDo: we should add timeout here.
-        let conn = get_idle_connection(inner).await?;
 
-        let (r, mut conn) = f(conn).await.map_err(|e| PoolError::Inner(e))?;
+        let conn = Timeout::new(
+            get_idle_connection(inner),
+            self.inner.statics.connection_timeout,
+        )
+        .await??;
+
+        let (r, mut conn) = f(conn).await.map_err(PoolError::Inner)?;
 
         let shared = self.inner.clone();
 
-        // ToDo: check if closed here?
         let broken = shared.manager.is_closed(&mut conn.conn.0);
         let mut inner: MutexGuard<PoolInner> = shared.pool.lock().await;
 
@@ -309,10 +327,30 @@ where
 
         Ok(r)
     }
+
+    pub async fn state(&self) -> State {
+        let inner = self.inner.pool.lock().await;
+        State {
+            connections: inner.num_conns,
+            idle_connections: inner.conns.len() as u32,
+        }
+    }
 }
 
-// Outside of Pool to avoid borrow splitting issues on self
-// NB: This is called with the pool lock held.
+pub struct State {
+    pub connections: u32,
+    pub idle_connections: u32,
+}
+
+impl fmt::Debug for State {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.debug_struct("State")
+            .field("connections", &self.connections)
+            .field("idle_connections", &self.idle_connections)
+            .finish()
+    }
+}
+
 async fn add_connection<Tls>(
     pool: &Arc<SharedPool<Tls>>,
     inner: &mut PoolInner,
@@ -323,10 +361,8 @@ where
     <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
     <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
 {
-    assert!(inner.num_conns + inner.pending_conns < pool.statics.max_size);
     inner.pending_conns += 1;
 
-    // ToDo: in case the add connection is slow try oneshot channel.
     let conn = pool
         .manager
         .connect(&pool.statics.statements)
@@ -341,8 +377,10 @@ where
         conn: Conn { conn, birth: now },
         idle_start: now,
     };
-    inner.pending_conns -= 1;
+
     inner.num_conns += 1;
+    inner.pending_conns -= 1;
+    pool.counter.fetch_add(1, Ordering::SeqCst);
     inner.put_idle_conn(conn);
 
     Ok(())
@@ -357,10 +395,8 @@ where
 {
     // async idle will return a stream of (Conn, u32). u32 is the current IdleConn count in pool plus the pending Conn count.
     // we may need to poll this stream multiple times as we would check if the conn is valid until we get a valid connection.
-    // ToDo: lock once
     let mut stream = AsyncIdle::get_idle(shared.clone());
 
-    // ToDo: is there a chance this loop will leak?
     loop {
         if let Some((mut conn, current_count)) = stream.next().await {
             // Spin up a new connection if necessary to retain our minimum idle count
@@ -392,6 +428,8 @@ where
                 break Ok(conn.into());
             }
         }
+
+        tokio_timer::delay(Instant::now() + LOOP_DELAY).await;
     }
 }
 
@@ -410,16 +448,23 @@ where
 {
     inner.num_conns -= to_drop.len() as u32;
 
+    let _ = shared.counter.fetch_update(
+        |mut c| {
+            c -= to_drop.len();
+            Some(c)
+        },
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    );
+
     // We might need to spin up more connections to maintain the idle limit, e.g.
     // if we hit connection lifetime limits
-    let f = if inner.num_conns + inner.pending_conns < shared.statics.max_size {
+    let f = if inner.num_conns + inner.pending_conns < shared.statics.min_idle {
         Pool::replenish_idle_connections_locked(shared, &mut *inner).await
     } else {
         Ok(())
     };
 
-    // Maybe unlock. If we're passed a MutexGuard, this will unlock. If we're passed a
-    // &mut MutexGuard it won't.
     drop(inner);
 
     // And drop the connections
@@ -455,6 +500,7 @@ where
     inner.conns = preserve;
 
     let to_drop = to_drop.into_iter().map(|c| c.conn).collect();
+
     drop_connections(shared, inner, to_drop).await
 }
 
@@ -473,7 +519,7 @@ where
                 let _ = reap_connections(&shared, inner).await;
             };
         }
-    })
+    });
 }
 
 /// Get IdleConn from pool asynchronously
@@ -511,24 +557,32 @@ where
     /// lock and require a `PoolInner`.
     /// if there is no connection from the pool we return Pending until we get a connection.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            let mut future: MutexLockFuture<PoolInner> = self.shared.pool.lock();
+        let this = self.get_mut();
 
-            let mut inner: MutexGuard<PoolInner> = match future.poll_unpin(cx) {
-                Poll::Ready(inner) => inner,
-                Poll::Pending => {
-                    drop(future);
-                    return Poll::Pending;
-                }
-            };
+        let waker = cx.waker();
 
-            if let Some(conn) = inner.conns.pop_front() {
-                let count = inner.num_conns + inner.pending_conns;
-                break Poll::Ready(Some((conn, count)));
-            } else {
-                drop(future);
-                return Poll::Pending;
-            }
+        if this.shared.counter.load(Ordering::SeqCst) > 0 {
+            waker.wake_by_ref()
+        }
+
+        let mut future: MutexLockFuture<PoolInner> = this.shared.pool.lock();
+
+        let mut inner: MutexGuard<PoolInner> = futures::ready!(future.poll_unpin(cx));
+
+        if let Some(conn) = inner.conns.pop_front() {
+            let count = inner.num_conns + inner.pending_conns;
+            let _ = this.shared.counter.fetch_update(
+                |mut c| {
+                    c -= 1;
+                    Some(c)
+                },
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+
+            Poll::Ready(Some((conn, count)))
+        } else {
+            Poll::Ready(None)
         }
     }
 }

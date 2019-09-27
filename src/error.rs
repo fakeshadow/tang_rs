@@ -16,3 +16,9 @@ impl<E> From<tokio_timer::timeout::Elapsed> for PoolError<E> {
         PoolError::TimeOut
     }
 }
+
+impl<E> From<futures::channel::oneshot::Canceled> for PoolError<E> {
+    fn from(_e: futures::channel::oneshot::Canceled) -> PoolError<E> {
+        PoolError::TimeOut
+    }
+}
