@@ -14,8 +14,14 @@ readme= "README.md"
 name = "tang_rs"
 path = "src/lib.rs"
 
-[dependencies.tokio]
-version = "0.2.0-alpha.5"
+[features]
+default = [ "tokio-timer", "tokio-executor" ]
+actix-web = [ "tokio-timer01", "parking_lot", "tokio-executor" ]
+
+
+[dependencies.parking_lot]
+version = "0.9"
+optional = true
 
 [dependencies.futures-preview]
 version = "0.3.0-alpha.18"
@@ -23,9 +29,16 @@ features = [ "nightly", "compat", "async-await" ]
 
 [dependencies.tokio-executor]
 version = "=0.2.0-alpha.5"
+optional = true
 
 [dependencies.tokio-timer]
 version = "=0.3.0-alpha.5"
+optional = true
+
+[dependencies.tokio-timer01]
+package= "tokio-timer"
+version = "=0.2.11"
+optional = true
 
 [dependencies.tokio-postgres]
 git = "https://github.com/sfackler/rust-postgres"

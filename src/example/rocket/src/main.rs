@@ -70,18 +70,15 @@ async fn index(pool: State<'_, Pool<tokio_postgres::NoTls>>) -> content::Json<St
 
                 // statement index is the same as the input vector when building the pool.
                 let statement = statements.get(0).unwrap();
-                let row = client
+                let topics = client
                     .query(statement, &[&ids])
                     .try_collect::<Vec<Row>>()
-                    .await?;
+                    .await?
+                    .into_iter()
+                    .map(|r|r.into())
+                    .collect::<Vec<Topic>>();
 
-                let mut t = Vec::with_capacity(21);
-
-                for r in row.into_iter() {
-                    t.push(Topic::from(r))
-                }
-
-                Ok(t)
+                Ok(topics)
             }
         ))
         .await
@@ -90,7 +87,7 @@ async fn index(pool: State<'_, Pool<tokio_postgres::NoTls>>) -> content::Json<St
                 PoolError::Inner(e) => println!("{:?}", e),
                 PoolError::TimeOut => (),
             };
-            panic!();
+            vec![]
         });
 
     content::Json(serde_json::to_string(&t).unwrap())

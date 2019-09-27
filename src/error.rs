@@ -11,8 +11,16 @@ impl From<Error> for PoolError<Error> {
     }
 }
 
+#[cfg(feature = "default")]
 impl<E> From<tokio_timer::timeout::Elapsed> for PoolError<E> {
     fn from(_e: tokio_timer::timeout::Elapsed) -> PoolError<E> {
+        PoolError::TimeOut
+    }
+}
+
+#[cfg(feature = "actix-web")]
+impl<E, T> From<tokio_timer01::timeout::Error<T>> for PoolError<E> {
+    fn from(_e: tokio_timer01::timeout::Error<T>) -> PoolError<E> {
         PoolError::TimeOut
     }
 }

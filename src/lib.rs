@@ -1,3 +1,78 @@
+//! # A tokio-postgres connection pool.
+//! use `tokio-0.2` runtime. most code come from [bb8](https://docs.rs/bb8/0.3.1/bb8/)
+//!
+//! # Known Limitation:
+//! No tests.
+//! no `tokio-0.1` support.
+//! can't be used in nested runtimes.
+//! low setting of idle_connect count could result in large amount of timeout error when the pool is under pressure.(before newly spawned connections catch up)
+//!
+//! # Example:
+//!``` rust
+//!use futures::TryStreamExt;
+//!use tang_rs::{Builder, PoolError, PostgresConnectionManager};
+//!
+//!#[tokio::main]
+//!async fn main() -> std::io::Result<()> {
+//!    let db_url = "postgres://postgres:123@localhost/test";
+//!    // setup manager
+//!    // only support NoTls for now
+//!    let mgr =
+//!        PostgresConnectionManager::new_from_stringlike(
+//!            db_url,
+//!            tokio_postgres::NoTls,
+//!        ).unwrap_or_else(|_| panic!("can't make postgres manager"));
+//!    // make prepared statements. pass Vec<tokio_postgres::types::Type> if you want typed statement. pass vec![] for no typed statement.
+//!    // ignore if you don't need any prepared statements.
+//!    let statements = vec![
+//!            ("SELECT * FROM topics WHERE id=ANY($1)", vec![tokio_postgres::types::Type::OID_ARRAY]),
+//!            ("SELECT * FROM posts WHERE id=ANY($1)", vec![])
+//!        ];
+//!    // make pool
+//!    let pool = Builder::new()
+//!        .always_check(false) // if set true every connection will be checked before checkout.
+//!        .idle_timeout(None) // set idle_timeout and max_lifetime both to None to ignore idle connection drop.
+//!        .max_lifetime(None)
+//!        .min_idle(1)   // when working with heavy load the min_idle count should be set a higher count close to max_size.
+//!        .max_size(12)
+//!        .prepare_statements(statements)
+//!        .build(mgr)
+//!        .await
+//!        .unwrap_or_else(|_| panic!("can't make pool"));
+//!    // wait a bit as the pool spawn connections asynchronously
+//!    tokio::timer::delay(std::time::Instant::now() + std::time::Duration::from_secs(1)).await;
+//!    // run the pool and use closure to query the database.
+//!    let _row = pool
+//!        .run(|mut conn| Box::pin(  // pin the async function to make sure the &mut Conn outlives our closure.
+//!            async move {
+//!                let (client, statements) = &mut conn;
+//!
+//!                // statement index is the same as the input vector when building the pool.
+//!                let statement = statements.get(0).unwrap();
+//!
+//!                // it's possible to overwrite the source statements with new prepared ones.
+//!                // but be ware when a new connection spawn the associated statements will be the ones you passed in builder.
+//!
+//!                let ids = vec![1u32, 2, 3, 4, 5];
+//!
+//!                let row = client.query(statement, &[&ids]).try_collect::<Vec<tokio_postgres::Row>>().await?;
+//!
+//!                Ok(row)
+//!             }
+//!        ))
+//!        .await
+//!        .map_err(|e| {
+//!                // return error will be wrapped in Inner.
+//!            match e {
+//!                PoolError::Inner(e) => println!("{:?}", e),
+//!                PoolError::TimeOut => ()
+//!                };
+//!            std::io::Error::new(std::io::ErrorKind::Other, "place holder error")
+//!        })?;
+//!   Ok(())
+//!}
+//!```
+
 #![feature(no_more_cas)]
 
 use std::cmp::{max, min};
@@ -10,26 +85,34 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use futures::{
-    lock::{Mutex, MutexGuard},
-    FutureExt, Stream, StreamExt,
-};
-use tokio_executor::spawn;
+#[cfg(feature = "default")]
+use futures::lock::Mutex;
+#[cfg(feature = "actix-web")]
+use futures::{compat::Future01CompatExt, compat::Stream01CompatExt, TryFutureExt};
+use futures::{FutureExt, Stream, StreamExt};
+#[cfg(feature = "actix-web")]
+use parking_lot::Mutex;
+use tokio_executor::current_thread::spawn as spawn_current;
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
-    types::Type,
     Client, Error, Socket, Statement,
 };
-use tokio_timer::{Interval, Timeout};
+#[cfg(feature = "default")]
+use tokio_timer::{delay, Interval, Timeout};
+#[cfg(feature = "actix-web")]
+use tokio_timer01::{Delay, Interval, Timeout};
 
+pub use builder::Builder;
 pub use error::PoolError;
 pub use postgres::PostgresConnectionManager;
-use postgres::PreparedStatement;
 
+mod builder;
 mod error;
 mod postgres;
 
-const LOOP_DELAY: Duration = Duration::from_millis(5);
+const LOOP_DELAY: Duration = Duration::from_millis(20);
+
+static IDLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Conn type contains connection itself and prepared statements for this connection.
 pub struct Conn {
@@ -61,140 +144,6 @@ impl From<IdleConn> for Conn {
     }
 }
 
-pub struct Builder {
-    max_size: u32,
-    min_idle: u32,
-    /// Whether or not to test the connection on checkout.
-    always_check: bool,
-    max_lifetime: Option<Duration>,
-    idle_timeout: Option<Duration>,
-    connection_timeout: Duration,
-    /// The time interval used to wake up and reap connections.
-    reaper_rate: Duration,
-    statements: Vec<PreparedStatement>,
-}
-
-impl Default for Builder {
-    fn default() -> Self {
-        Builder {
-            max_size: 10,
-            min_idle: 1,
-            always_check: true,
-            max_lifetime: Some(Duration::from_secs(30 * 60)),
-            idle_timeout: Some(Duration::from_secs(10 * 60)),
-            connection_timeout: Duration::from_secs(10),
-            reaper_rate: Duration::from_secs(30),
-            statements: vec![],
-        }
-    }
-}
-
-impl Builder {
-    pub fn new() -> Builder {
-        Default::default()
-    }
-
-    pub fn max_size(mut self, max_size: u32) -> Builder {
-        if max_size > 0 {
-            self.max_size = max_size;
-        }
-        self
-    }
-
-    pub fn min_idle(mut self, min_idle: u32) -> Builder {
-        self.min_idle = min_idle;
-        self
-    }
-
-    /// If true, the health of a connection will be verified through a call to
-    /// `ManageConnection::is_valid` before it is provided to a pool user.
-    ///
-    /// Defaults to true.
-    pub fn always_check(mut self, always_check: bool) -> Builder {
-        self.always_check = always_check;
-        self
-    }
-
-    /// Sets the maximum lifetime of connections in the pool.
-    ///
-    /// If set, connections will be closed at the next reaping after surviving
-    /// past this duration.
-    ///
-    /// If a connection reachs its maximum lifetime while checked out it will be
-    /// closed when it is returned to the pool.
-    ///
-    /// Defaults to 30 minutes.
-    pub fn max_lifetime(mut self, max_lifetime: Option<Duration>) -> Builder {
-        self.max_lifetime = max_lifetime;
-        self
-    }
-
-    /// Sets the idle timeout used by the pool.
-    ///
-    /// If set, idle connections in excess of `min_idle` will be closed at the
-    /// next reaping after remaining idle past this duration.
-    ///
-    /// Defaults to 10 minutes.
-    pub fn idle_timeout(mut self, idle_timeout: Option<Duration>) -> Builder {
-        self.idle_timeout = idle_timeout;
-        self
-    }
-
-    /// Sets the connection timeout used by the pool.
-    ///
-    /// Futures returned by `Pool::get` will wait this long before giving up and
-    /// resolving with an error.
-    ///
-    /// Defaults to 30 seconds.
-    pub fn connection_timeout(mut self, connection_timeout: impl Into<Duration>) -> Builder {
-        self.connection_timeout = connection_timeout.into();
-        self
-    }
-
-    /// prepared statements can be passed when connecting to speed up frequent used queries.
-    /// example:
-    /// ```rust
-    /// use tokio_postgres::types::Type;
-    ///
-    /// let statements = vec![
-    ///     ("SELECT * from table WHERE id = $1".to_owned(), vec![Type::OID]),
-    ///     ("SELECT * from table2 WHERE id = $1", vec![]) // pass empty vec if you don't want a type specific prepare.
-    /// ];
-    /// let builder = crate::Builder::new().prepare_statements(statements);
-    /// ```
-    pub fn prepare_statements(mut self, statements: Vec<(&str, Vec<Type>)>) -> Self {
-        let statements = statements
-            .into_iter()
-            .map(|p| p.into())
-            .collect::<Vec<PreparedStatement>>();
-
-        self.statements = statements;
-        self
-    }
-
-    /// Consumes the builder, returning a new, initialized `Pool`.
-    pub async fn build<Tls>(
-        self,
-        manager: PostgresConnectionManager<Tls>,
-    ) -> Result<Pool<Tls>, PoolError<Error>>
-    where
-        Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
-        <Tls as MakeTlsConnect<Socket>>::Stream: Send,
-        <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
-        <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
-    {
-        assert!(
-            self.max_size >= self.min_idle,
-            "min_idle must be no larger than max_size"
-        );
-
-        let pool = Pool::new_inner(self, manager);
-
-        pool.replenish_idle_connections().await?;
-        Ok(pool)
-    }
-}
-
 struct PoolInner {
     conns: VecDeque<IdleConn>,
     num_conns: u32,
@@ -213,7 +162,6 @@ struct SharedPool<Tls: MakeTlsConnect<Socket>> {
     statics: Builder,
     manager: PostgresConnectionManager<Tls>,
     pool: Mutex<PoolInner>,
-    counter: AtomicUsize,
 }
 
 pub struct Pool<Tls: MakeTlsConnect<Socket>> {
@@ -252,7 +200,6 @@ where
             statics: builder,
             manager,
             pool: Mutex::new(inner),
-            counter: AtomicUsize::new(0),
         });
 
         // spawn a loop interval future to handle the lifetime and time out of connections.
@@ -278,7 +225,6 @@ where
         let desired = pool.statics.min_idle;
 
         for _i in idle..max(idle + 1, min(desired, slots_available)) {
-            println!("spawning");
             let _ = add_connection(pool, inner).await;
         }
 
@@ -286,7 +232,11 @@ where
     }
 
     async fn replenish_idle_connections(&self) -> Result<(), Error> {
+        #[cfg(feature = "actix-web")]
+        let mut locked = self.inner.pool.lock();
+        #[cfg(feature = "default")]
         let mut locked = self.inner.pool.lock().await;
+
         Pool::replenish_idle_connections_locked(&self.inner, &mut locked).await
     }
 
@@ -304,6 +254,15 @@ where
     {
         let inner = self.inner.clone();
 
+        #[cfg(feature = "actix-web")]
+        let mut conn = Timeout::new(
+            get_idle_connection(inner).boxed_local().compat(),
+            self.inner.statics.connection_timeout,
+        )
+        .compat()
+        .await?;
+
+        #[cfg(feature = "default")]
         let mut conn = Timeout::new(
             get_idle_connection(inner),
             self.inner.statics.connection_timeout,
@@ -315,18 +274,26 @@ where
         let shared = self.inner.clone();
 
         let broken = shared.manager.is_closed(&mut conn.conn.0);
-        let mut inner: MutexGuard<PoolInner> = shared.pool.lock().await;
+        #[cfg(feature = "actix-web")]
+        let mut inner = shared.pool.lock();
+        #[cfg(feature = "default")]
+        let mut inner = shared.pool.lock().await;
 
         if broken {
-            let _r = drop_connections(&shared, inner, vec![conn]).await;
+            let _r = drop_connections(&shared, &mut inner, vec![conn]).await;
         } else {
             inner.conns.push_back(conn.into());
+            IDLE_COUNTER.fetch_add(1, Ordering::Relaxed);
         }
         result
     }
 
     pub async fn state(&self) -> State {
+        #[cfg(feature = "actix-web")]
+        let inner = self.inner.pool.lock();
+        #[cfg(feature = "default")]
         let inner = self.inner.pool.lock().await;
+
         State {
             connections: inner.num_conns,
             idle_connections: inner.conns.len() as u32,
@@ -377,8 +344,9 @@ where
 
     inner.num_conns += 1;
     inner.pending_conns -= 1;
-    pool.counter.fetch_add(1, Ordering::SeqCst);
+
     inner.put_idle_conn(conn);
+    IDLE_COUNTER.fetch_add(1, Ordering::Relaxed);
 
     Ok(())
 }
@@ -399,7 +367,12 @@ where
             // Spin up a new connection if necessary to retain our minimum idle count
             if current_count < shared.statics.max_size {
                 // ToDo: lock twice. could reduce lock time to one.
+
+                #[cfg(feature = "actix-web")]
+                let mut inner = shared.pool.lock();
+                #[cfg(feature = "default")]
                 let mut inner = shared.pool.lock().await;
+
                 /*
                     we have to double check as we lost the lock when we poll the stream.
                     so there could possible a racing condition.
@@ -417,16 +390,23 @@ where
                     Ok(_) => break Ok(conn.into()),
                     Err(_) => {
                         let shared_1 = shared.clone();
-                        let inner: MutexGuard<PoolInner> = shared_1.pool.lock().await;
-                        let _ = drop_connections(&shared, inner, vec![conn.into()]).await;
+
+                        #[cfg(feature = "actix-web")]
+                        let mut inner = shared_1.pool.lock();
+                        #[cfg(feature = "default")]
+                        let mut inner = shared_1.pool.lock().await;
+
+                        let _ = drop_connections(&shared, &mut inner, vec![conn.into()]).await;
                     }
                 }
             } else {
                 break Ok(conn.into());
             }
         }
-
-        tokio_timer::delay(Instant::now() + LOOP_DELAY).await;
+        #[cfg(feature = "actix-web")]
+        let _ = Delay::new(Instant::now() + LOOP_DELAY).compat().await;
+        #[cfg(feature = "default")]
+        delay(Instant::now() + LOOP_DELAY).await;
     }
 }
 
@@ -434,7 +414,7 @@ where
 // NB: This is called with the pool lock held.
 async fn drop_connections<Tls>(
     shared: &Arc<SharedPool<Tls>>,
-    mut inner: MutexGuard<'_, PoolInner>,
+    inner: &mut PoolInner,
     to_drop: Vec<Conn>,
 ) -> Result<(), Error>
 where
@@ -445,14 +425,7 @@ where
 {
     inner.num_conns -= to_drop.len() as u32;
 
-    let _ = shared.counter.fetch_update(
-        |mut c| {
-            c -= to_drop.len();
-            Some(c)
-        },
-        Ordering::SeqCst,
-        Ordering::SeqCst,
-    );
+    IDLE_COUNTER.fetch_sub(to_drop.len(), Ordering::Relaxed);
 
     // We might need to spin up more connections to maintain the idle limit, e.g.
     // if we hit connection lifetime limits
@@ -461,8 +434,6 @@ where
     } else {
         Ok(())
     };
-
-    drop(inner);
 
     // And drop the connections
     // TODO: connection_customizer::on_release! That would require figuring out the
@@ -474,7 +445,7 @@ where
 // NB: This is called with the pool lock held.
 async fn reap_connections<Tls>(
     shared: &Arc<SharedPool<Tls>>,
-    mut inner: MutexGuard<'_, PoolInner>,
+    inner: &mut PoolInner,
 ) -> Result<(), Error>
 where
     Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
@@ -501,19 +472,27 @@ where
     drop_connections(shared, inner, to_drop).await
 }
 
-fn schedule_one_reaping<Tls>(mut interval: Interval, weak_shared: Weak<SharedPool<Tls>>)
+fn schedule_one_reaping<Tls>(interval: Interval, weak_shared: Weak<SharedPool<Tls>>)
 where
     Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
     <Tls as MakeTlsConnect<Socket>>::Stream: Send,
     <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
     <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
 {
-    spawn(async move {
+    spawn_current(async move {
+        #[cfg(feature = "actix-web")]
+        let mut interval = interval.compat();
+        #[cfg(feature = "default")]
+        let mut interval = interval;
         loop {
             let _i = interval.next().await;
             if let Some(shared) = weak_shared.upgrade() {
-                let inner = shared.pool.lock().await;
-                let _ = reap_connections(&shared, inner).await;
+                #[cfg(feature = "actix-web")]
+                let mut inner = shared.pool.lock();
+                #[cfg(feature = "default")]
+                let mut inner = shared.pool.lock().await;
+
+                let _ = reap_connections(&shared, &mut inner).await;
             };
         }
     });
@@ -552,29 +531,25 @@ where
     type Item = (IdleConn, u32);
 
     /// lock and require a `PoolInner`.
-    /// we wake the context if the shared pool have a counter bigger than 0. then we try to poll the lock. and if there is a connection in locked pool we poll the stream.
+    /// we wake the context if the shared pool have a counter bigger than 0.
+    /// After that we try to poll the lock and if there is a connection in locked pool we poll the stream with Some.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let waker = cx.waker();
 
-        if self.shared.counter.load(Ordering::SeqCst) > 0 {
+        if IDLE_COUNTER.load(Ordering::SeqCst) > 0 {
             waker.wake_by_ref()
         }
 
         let this = self.get_mut();
 
-        let mut inner: MutexGuard<PoolInner> =
-            futures::ready!(this.shared.pool.lock().poll_unpin(cx));
+        #[cfg(feature = "actix-web")]
+        let mut inner = this.shared.pool.lock();
+        #[cfg(feature = "default")]
+        let mut inner = futures::ready!(this.shared.pool.lock().poll_unpin(cx));
 
         if let Some(conn) = inner.conns.pop_front() {
+            IDLE_COUNTER.fetch_sub(1, Ordering::Relaxed);
             let count = inner.num_conns + inner.pending_conns;
-            let _ = this.shared.counter.fetch_update(
-                |mut c| {
-                    c -= 1;
-                    Some(c)
-                },
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            );
 
             Poll::Ready(Some((conn, count)))
         } else {

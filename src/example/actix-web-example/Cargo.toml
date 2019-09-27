@@ -1,15 +1,16 @@
 [package]
-name = "tang-example-rocket"
+name = "actix-web-example"
 version = "0.1.0"
 authors = ["fakeshadow <24548779@qq.com>"]
 edition = "2018"
 
-[dependencies.rocket]
-git = "https://github.com/SergioBenitez/Rocket"
-branch = "async"
 
-[dependencies.serde_json]
-version = "1.0.40"
+[dependencies.actix]
+version = "0.8.3"
+
+[dependencies.actix-web]
+version = "1.0.8"
+default-features = false
 
 [dependencies.serde]
 version = "1.0.101"
@@ -18,18 +19,19 @@ default-features = false
 [dependencies.serde_derive]
 version = "1.0.101"
 
+[dependencies.futures-preview]
+version = "0.3.0-alpha.18"
+features = [ "nightly", "async-await" ]
+
 [dependencies.tokio]
 version = "0.2.0-alpha.5"
 default-features = false
 features = [ "io", "codec", "fs" ]
-
-[dependencies.futures-preview]
-version = "0.3.0-alpha.18"
-features = [ "nightly", "compat", "async-await" ]
 
 [dependencies.tokio-postgres]
 git = "https://github.com/sfackler/rust-postgres"
 
 [dependencies.tang-rs]
 path = "../../../"
-features = [ "default" ]
+default-features = false
+features = [ "actix-web" ]

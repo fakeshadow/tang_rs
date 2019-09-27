@@ -1,11 +1,10 @@
 use std::{borrow::Cow, fmt, str::FromStr};
 
 use futures::{future::Either, FutureExt, TryFutureExt, TryStreamExt};
-use tokio_executor::spawn;
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
     types::Type,
-    Client, Config, Error, SimpleQueryMessage, Socket, Statement,
+    Client, Config, Error, Socket, Statement,
 };
 
 #[derive(Clone)]
@@ -51,9 +50,10 @@ where
         &self,
         prepares: &[PreparedStatement],
     ) -> Result<(Client, Vec<Statement>), Error> {
+        // ToDo: figure a way to pass self.tls to connect method.
         let (mut c, conn) = self.config.connect(tokio_postgres::NoTls).await?;
 
-        spawn(conn.map(|_| ()));
+        tokio_executor::spawn(conn.map(|_| ()));
 
         // make prepared statements if there is any and set manager prepares for later use.
         let sts = if !prepares.is_empty() {
@@ -84,13 +84,7 @@ where
 
     /// pin and box simple_query so that we can only try once from the stream.
     pub(crate) async fn is_valid(&self, c: &mut Client) -> Result<(), Error> {
-        // ToDo: try_next only work on latest nightly
-        //        Box::pin(c.simple_query("")).try_next().map_ok(|_| ()).await
-
-        c.simple_query("")
-            .try_collect::<Vec<SimpleQueryMessage>>()
-            .map_ok(|_| ())
-            .await
+        Box::pin(c.simple_query("")).try_next().map_ok(|_| ()).await
     }
 
     pub(crate) fn is_closed(&self, conn: &mut Client) -> bool {
@@ -110,6 +104,7 @@ where
 }
 
 /// wrapper type for prepared statement
+// ToDo: add runtime refresh of prepared statement
 #[derive(Clone)]
 pub(crate) struct PreparedStatement(Cow<'static, str>, Cow<'static, [Type]>);
 
