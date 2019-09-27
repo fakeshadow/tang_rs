@@ -14,6 +14,9 @@ readme= "README.md"
 name = "tang_rs"
 path = "src/lib.rs"
 
+[dependencies.tokio]
+version = "0.2.0-alpha.5"
+
 [dependencies.futures-preview]
 version = "0.3.0-alpha.18"
 features = [ "nightly", "compat", "async-await" ]

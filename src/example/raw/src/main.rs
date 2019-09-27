@@ -23,10 +23,10 @@ async fn main() -> std::io::Result<()> {
 
     // make pool
     let pool = Builder::new()
-        .always_check(false) // check connection health could not be working properly
-        .idle_timeout(None) // close and/or spawn idle connection could not be working properly
+        .always_check(false) // if set true every connection will be checked before checkout.
+        .idle_timeout(None) // set to None to ignore idle connection drop.
         .max_lifetime(None)
-        .min_idle(12)
+        .min_idle(1)
         .max_size(12)
         .prepare_statements(statements)
         .build(mgr)
@@ -37,23 +37,22 @@ async fn main() -> std::io::Result<()> {
     tokio::timer::delay(std::time::Instant::now() + std::time::Duration::from_secs(1)).await;
 
     let _row = pool
-        .run(|mut conn| async move {
-            let (client, statements) = &mut conn.conn;
+        .run(|mut conn| Box::pin(  // pin the async function to make sure the &mut Conn outlives our closure.
+            async move {
+                let (client, statements) = &mut conn;
 
-            // statement index is the same as the input vector when building the pool.
-            let statement = statements.get(0).unwrap();
+                // statement index is the same as the input vector when building the pool.
+                let statement = statements.get(0).unwrap();
 
-            let ids = vec![1u32,2,3,4,5];
+                let ids = vec![1u32, 2, 3, 4, 5];
 
-            let row = client
-                .query(statement, &[&ids])
-                .try_collect::<Vec<tokio_postgres::Row>>().await?;
+                let row = client
+                    .query(statement, &[&ids])
+                    .try_collect::<Vec<tokio_postgres::Row>>().await?;
 
-            // wrap your return type and the Conn in tuple. so that the Conn can be put back to pool.
-            let result = (row, conn);
-
-            Ok(result)
-        })
+                Ok(row)
+            }
+        ))
         .await
         .map_err(|e| {
             // return error will be wrapped in Inner.

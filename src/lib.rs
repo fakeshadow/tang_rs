@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use futures::{
-    lock::{Mutex, MutexGuard, MutexLockFuture},
+    lock::{Mutex, MutexGuard},
     FutureExt, Stream, StreamExt,
 };
 use tokio_executor::spawn;
@@ -29,7 +29,7 @@ use postgres::PreparedStatement;
 mod error;
 mod postgres;
 
-const LOOP_DELAY: Duration = Duration::from_millis(2);
+const LOOP_DELAY: Duration = Duration::from_millis(5);
 
 /// Conn type contains connection itself and prepared statements for this connection.
 pub struct Conn {
@@ -294,25 +294,23 @@ where
         Builder::new()
     }
 
-    pub async fn run<T, E, F, Fut>(&self, f: F) -> Result<T, PoolError<E>>
+    pub async fn run<T, E, F>(&self, f: F) -> Result<T, PoolError<E>>
     where
-        // ToDo: possible take in Statements as Option
-        // ToDo: we could take advantage of async/await and pass mut reference to closure.
-        // this can't be done now as the compiler in latest nightly build have a bug related to a Sync bound requirement for ToSql trait.
-        F: FnOnce(Conn) -> Fut,
-        Fut: Future<Output = Result<(T, Conn), E>> + Send + 'static,
+        F: FnOnce(
+            &mut (Client, Vec<Statement>),
+        ) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + '_>>,
         PoolError<E>: From<Error>,
         T: Send + 'static,
     {
         let inner = self.inner.clone();
 
-        let conn = Timeout::new(
+        let mut conn = Timeout::new(
             get_idle_connection(inner),
             self.inner.statics.connection_timeout,
         )
         .await??;
 
-        let (r, mut conn) = f(conn).await.map_err(PoolError::Inner)?;
+        let result = f(&mut conn.conn).await.map_err(PoolError::Inner);
 
         let shared = self.inner.clone();
 
@@ -324,8 +322,7 @@ where
         } else {
             inner.conns.push_back(conn.into());
         }
-
-        Ok(r)
+        result
     }
 
     pub async fn state(&self) -> State {
@@ -555,19 +552,18 @@ where
     type Item = (IdleConn, u32);
 
     /// lock and require a `PoolInner`.
-    /// if there is no connection from the pool we return Pending until we get a connection.
+    /// we wake the context if the shared pool have a counter bigger than 0. then we try to poll the lock. and if there is a connection in locked pool we poll the stream.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-
         let waker = cx.waker();
 
-        if this.shared.counter.load(Ordering::SeqCst) > 0 {
+        if self.shared.counter.load(Ordering::SeqCst) > 0 {
             waker.wake_by_ref()
         }
 
-        let mut future: MutexLockFuture<PoolInner> = this.shared.pool.lock();
+        let this = self.get_mut();
 
-        let mut inner: MutexGuard<PoolInner> = futures::ready!(future.poll_unpin(cx));
+        let mut inner: MutexGuard<PoolInner> =
+            futures::ready!(this.shared.pool.lock().poll_unpin(cx));
 
         if let Some(conn) = inner.conns.pop_front() {
             let count = inner.num_conns + inner.pending_conns;
