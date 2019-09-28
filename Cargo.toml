@@ -16,15 +16,19 @@ path = "src/lib.rs"
 
 [features]
 default = [ "tokio-timer", "tokio-executor" ]
-actix-web = [ "tokio-timer01", "parking_lot", "tokio-executor" ]
+actix-web = [ "tokio-timer01", "parking_lot", "tokio-executor", "actix-rt" ]
 
+
+[dependencies.actix-rt]
+version = "0.2.5"
+optional = true
 
 [dependencies.parking_lot]
 version = "0.9"
 optional = true
 
 [dependencies.futures-preview]
-version = "0.3.0-alpha.18"
+version = "=0.3.0-alpha.18"
 features = [ "nightly", "compat", "async-await" ]
 
 [dependencies.tokio-executor]

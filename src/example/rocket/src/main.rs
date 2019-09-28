@@ -5,14 +5,20 @@ extern crate rocket;
 #[macro_use]
 extern crate serde_derive;
 
-use futures::TryStreamExt;
-use rocket::response::content;
-use rocket::State;
 use std::convert::From;
-use tang_rs::{Builder, Pool, PoolError, PostgresConnectionManager};
+
+use futures::TryStreamExt;
+use rocket::{
+    config::{Config, Environment},
+    response::content,
+    State
+};
+use tang_rs::{Builder, Pool, PostgresConnectionManager};
 use tokio::runtime::Runtime;
-use tokio_postgres::Row;
-use tokio_postgres::types::Type;
+use tokio_postgres::{
+    Row,
+    types::Type
+};
 
 // don't use tokio macro and async main as this will result in nested runtime.
 fn main() {
@@ -29,7 +35,7 @@ fn main() {
             "SELECT * FROM topics WHERE id=ANY($1)",
             vec![Type::OID_ARRAY],
         ),
-        ("SELECT * FROM posts WHERE id=ANY($1)", vec![]),
+        ("SELECT * FROM users WHERE id=ANY($1)", vec![]),
     ];
 
     // build pool
@@ -46,11 +52,19 @@ fn main() {
         )
         .unwrap_or_else(|_| panic!("can't make pool"));
 
+    let cfg = Config::build(Environment::Production)
+        .address("localhost")
+        .port(8000)
+        .workers(36)
+        .keep_alive(10)
+        .expect("Failed to build Rocket Config");
+
     // build server
-    let server = rocket::ignite()
-        .mount("/test", routes![index])
-        .manage(pool)
-        .spawn_on(&runtime);
+    let server =
+        rocket::custom(cfg)
+            .mount("/test", routes![index])
+            .manage(pool)
+            .spawn_on(&runtime);
 
     runtime.block_on(async move {
         let _ = server.await;
@@ -63,35 +77,55 @@ async fn index(pool: State<'_, Pool<tokio_postgres::NoTls>>) -> content::Json<St
         .run(|mut conn| Box::pin( // pin the async function to make sure the &mut Conn outlives our closure.
             async move {
                 let (client, statements) = &mut conn;
-
                 let ids = vec![
-                    1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
-                ];
+                        1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
+                    ];
 
                 // statement index is the same as the input vector when building the pool.
                 let statement = statements.get(0).unwrap();
-                let topics = client
-                    .query(statement, &[&ids])
-                    .try_collect::<Vec<Row>>()
-                    .await?
-                    .into_iter()
-                    .map(|r|r.into())
-                    .collect::<Vec<Topic>>();
 
-                Ok(topics)
+                let (t, u): (Vec<Topic>, Vec<u32>) = client
+                    .query(statement, &[&ids])
+                    .try_fold(
+                        (Vec::with_capacity(20), Vec::with_capacity(20)),
+                        |(mut t, mut u), r| {
+                            u.push(r.get(1));
+                            t.push(r.into());
+                            futures::future::ok((t, u))
+                        }
+                    )
+                    .await?;
+
+                let _u = client
+                    .query(statements.get(1).unwrap(), &[&u])
+                    .try_collect::<Vec<Row>>()
+                    .await?;
+
+                // return custom Error as long as your error type impl From<tokio_postgres::Error> and From<tokio_timer::timeout::Elapsed>
+                Ok::<_, MyError>(t)
+                // or you could use default PollError<PoolError<tokio_postgres::Error>> here
+//                Ok::<_, PoolError<tokio_postgres::Error>>
             }
         ))
         .await
-        .unwrap_or_else(|e| {
-            match e {
-                PoolError::Inner(e) => println!("{:?}", e),
-                PoolError::TimeOut => (),
-            };
-            vec![]
-        });
+        .unwrap_or_else(|_e: MyError| vec![]);
 
     content::Json(serde_json::to_string(&t).unwrap())
 }
+
+struct MyError;
+
+impl From<tokio_postgres::Error> for MyError {
+    fn from(_e:tokio_postgres::Error ) -> MyError {
+        MyError
+    }
+}
+impl From<tokio::timer::timeout::Elapsed> for MyError {
+    fn from(_e: tokio::timer::timeout::Elapsed) -> MyError {
+        MyError
+    }
+}
+
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Topic {

@@ -2,12 +2,12 @@
 extern crate serde_derive;
 
 use actix::prelude::Future as Future01;
+use actix_web::{App, Error, HttpResponse, HttpServer, web};
 use actix_web::web::Data;
-use actix_web::{web, App, Error, HttpResponse, HttpServer};
 use futures::{FutureExt, TryFutureExt, TryStreamExt};
 use tang_rs::{Builder, Pool, PoolError, PostgresConnectionManager};
-use tokio_postgres::types::Type;
 use tokio_postgres::Row;
+use tokio_postgres::types::Type;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -68,43 +68,34 @@ async fn test_async(pool: Data<Pool<tokio_postgres::NoTls>>) -> Result<HttpRespo
                     1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
                 ];
 
-                let (t, u): (_, Vec<u32>) = client
+                let (t, u): (Vec<Topic>, Vec<u32>) = client
                     .query(statements.get(0).unwrap(), &[&ids])
                     .try_fold(
                         (Vec::with_capacity(20), Vec::with_capacity(20)),
                         |(mut t, mut u), r| {
-                            t.push(Topic {
-                                id: r.get(0),
-                                user_id: r.get(1),
-                                category_id: r.get(2),
-                                title: r.get(3),
-                                body: r.get(4),
-                                thumbnail: r.get(5),
-                                is_locked: r.get(8),
-                                is_visible: r.get(9),
-                            });
                             u.push(r.get(1));
+                            t.push(r.into());
                             futures::future::ok((t, u))
                         },
                     )
                     .await?;
 
-                let u = client
+                let _u = client
                     .query(statements.get(1).unwrap(), &[&u])
                     .try_collect::<Vec<Row>>()
                     .await?;
 
-                Ok(t)
+                Ok::<_, PoolError>(t)
             })
         })
-        .await
-        .map_err(|e| {
+        .map_err(|e: PoolError| {
             match e {
                 PoolError::Inner(e) => println!("{:?}", e),
                 PoolError::TimeOut => (),
             };
             actix_web::error::ErrorInternalServerError("lol")
-        })?;
+        })
+        .await?;
 
     Ok(HttpResponse::Ok().json(&t))
 }
@@ -119,4 +110,19 @@ struct Topic {
     pub thumbnail: String,
     pub is_locked: bool,
     pub is_visible: bool,
+}
+
+impl From<Row> for Topic {
+    fn from(r: Row) -> Self {
+        Topic {
+            id: r.get(0),
+            user_id: r.get(1),
+            category_id: r.get(2),
+            title: r.get(3),
+            body: r.get(4),
+            thumbnail: r.get(5),
+            is_locked: r.get(8),
+            is_visible: r.get(9),
+        }
+    }
 }

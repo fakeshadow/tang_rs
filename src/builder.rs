@@ -6,7 +6,7 @@ use tokio_postgres::{
     Error, Socket,
 };
 
-use crate::{postgres::PreparedStatement, Pool, PoolError, PostgresConnectionManager};
+use crate::{postgres::PreparedStatement, Pool, PostgresConnectionManager};
 
 pub struct Builder {
     pub(crate) max_size: u32,
@@ -26,7 +26,7 @@ impl Default for Builder {
         Builder {
             max_size: 10,
             min_idle: 1,
-            always_check: false,
+            always_check: true,
             max_lifetime: Some(Duration::from_secs(30 * 60)),
             idle_timeout: Some(Duration::from_secs(10 * 60)),
             connection_timeout: Duration::from_secs(10),
@@ -121,7 +121,7 @@ impl Builder {
     pub async fn build<Tls>(
         self,
         manager: PostgresConnectionManager<Tls>,
-    ) -> Result<Pool<Tls>, PoolError<Error>>
+    ) -> Result<Pool<Tls>, Error>
     where
         Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
         <Tls as MakeTlsConnect<Socket>>::Stream: Send,

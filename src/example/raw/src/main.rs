@@ -50,7 +50,7 @@ async fn main() -> std::io::Result<()> {
                     .query(statement, &[&ids])
                     .try_collect::<Vec<tokio_postgres::Row>>().await?;
 
-                Ok(row)
+                Ok::<_, PoolError>(row)
             }
         ))
         .await
