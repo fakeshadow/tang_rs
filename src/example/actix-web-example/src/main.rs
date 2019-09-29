@@ -2,12 +2,15 @@
 extern crate serde_derive;
 
 use actix::prelude::Future as Future01;
-use actix_web::{App, Error, error::ErrorInternalServerError, HttpResponse, HttpServer, web};
-use actix_web::web::Data;
+use actix_web::{
+    error::ErrorInternalServerError,
+    web::{self, Data},
+    App, Error, HttpResponse, HttpServer,
+};
 use futures::{FutureExt, TryFutureExt, TryStreamExt};
 use tang_rs::{Builder, Pool, PoolError, PostgresConnectionManager};
-use tokio_postgres::Row;
 use tokio_postgres::types::Type;
+use tokio_postgres::Row;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -31,6 +34,7 @@ async fn main() -> std::io::Result<()> {
         min_idle equals to max_size.
         and the server has to be restart if all connections are gone broken
     */
+
     let pool = Builder::new()
         .always_check(false)
         .idle_timeout(None)
@@ -47,14 +51,14 @@ async fn main() -> std::io::Result<()> {
             .data(pool.clone())
             .service(web::resource("/test").route(web::get().to_async(test)))
     })
-        .bind("localhost:8000")
-        .unwrap()
-        .run()
+    .bind("localhost:8000")
+    .unwrap()
+    .run()
 }
 
 fn test(
     pool: Data<Pool<tokio_postgres::NoTls>>,
-) -> impl Future01<Item=HttpResponse, Error=Error> {
+) -> impl Future01<Item = HttpResponse, Error = Error> {
     test_async(pool).boxed_local().compat()
 }
 

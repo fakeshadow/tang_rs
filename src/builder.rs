@@ -9,8 +9,8 @@ use tokio_postgres::{
 use crate::{postgres::PreparedStatement, Pool, PostgresConnectionManager};
 
 pub struct Builder {
-    pub(crate) max_size: u32,
-    pub(crate) min_idle: u32,
+    pub(crate) max_size: u8,
+    pub(crate) min_idle: u8,
     /// Whether or not to test the connection on checkout.
     pub(crate) always_check: bool,
     pub(crate) max_lifetime: Option<Duration>,
@@ -30,7 +30,7 @@ impl Default for Builder {
             max_lifetime: Some(Duration::from_secs(30 * 60)),
             idle_timeout: Some(Duration::from_secs(10 * 60)),
             connection_timeout: Duration::from_secs(10),
-            reaper_rate: Duration::from_secs(30),
+            reaper_rate: Duration::from_secs(15),
             statements: vec![],
         }
     }
@@ -41,14 +41,14 @@ impl Builder {
         Default::default()
     }
 
-    pub fn max_size(mut self, max_size: u32) -> Builder {
+    pub fn max_size(mut self, max_size: u8) -> Builder {
         if max_size > 0 {
             self.max_size = max_size;
         }
         self
     }
 
-    pub fn min_idle(mut self, min_idle: u32) -> Builder {
+    pub fn min_idle(mut self, min_idle: u8) -> Builder {
         self.min_idle = min_idle;
         self
     }
@@ -86,13 +86,23 @@ impl Builder {
         self
     }
 
+    /// Sets the connection reaper rate.
+    ///
+    /// The connection that are idle and live beyond the time gate will be dropped..
+    ///
+    /// Default 15 seconds and only one connection will be checked in each interval.
+    pub fn reaper_rate(mut self, reaper_rate: Duration) -> Builder {
+        self.reaper_rate = reaper_rate.into();
+        self
+    }
+
     /// Sets the connection timeout used by the pool.
     ///
-    /// The closure of pool.run() will cancel and return a timeout error.
+    /// The closure of pool.run() and the pool.get() method will cancel and return a timeout error.
     ///
     /// Default 10 seconds.
-    pub fn connection_timeout(mut self, connection_timeout: impl Into<Duration>) -> Builder {
-        self.connection_timeout = connection_timeout.into();
+    pub fn connection_timeout(mut self, connection_timeout: Duration) -> Builder {
+        self.connection_timeout = connection_timeout;
         self
     }
 
@@ -134,8 +144,8 @@ impl Builder {
         );
 
         let pool = Pool::new_inner(self, manager);
+        pool.0.replenish_idle_connections().await?;
 
-        pool.replenish_idle_connections().await?;
         Ok(pool)
     }
 }

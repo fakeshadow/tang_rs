@@ -5,21 +5,16 @@ extern crate rocket;
 #[macro_use]
 extern crate serde_derive;
 
-use std::convert::From;
-
 use futures::TryStreamExt;
 use rocket::{
     config::{Config, Environment},
     response::{content, Debug},
     State,
 };
-use tokio::runtime::Runtime;
-use tokio_postgres::{
-    Row,
-    types::Type,
-};
-
+use std::convert::From;
 use tang_rs::{Builder, Pool, PostgresConnectionManager};
+use tokio::runtime::Runtime;
+use tokio_postgres::{types::Type, Row};
 
 // don't use tokio macro and async main as this will result in nested runtime.
 fn main() {
@@ -44,9 +39,9 @@ fn main() {
         .block_on(
             Builder::new()
                 .always_check(false)
-                .idle_timeout(None)
-                .max_lifetime(None)
-                .min_idle(12)
+                .idle_timeout(Some(std::time::Duration::from_secs(20)))
+                .max_lifetime(Some(std::time::Duration::from_secs(20)))
+                .min_idle(1)
                 .max_size(24)
                 .prepare_statements(statements)
                 .build(mgr),
@@ -61,11 +56,10 @@ fn main() {
         .expect("Failed to build Rocket Config");
 
     // build server
-    let server =
-        rocket::custom(cfg)
-            .mount("/test", routes![index])
-            .manage(pool)
-            .spawn_on(&runtime);
+    let server = rocket::custom(cfg)
+        .mount("/test", routes![index])
+        .manage(pool)
+        .spawn_on(&runtime);
 
     runtime.block_on(async move {
         let _ = server.await;
@@ -73,8 +67,9 @@ fn main() {
 }
 
 #[get("/")]
-async fn index(pool: State<'_, Pool<tokio_postgres::NoTls>>) -> Result<content::Json<String>, Debug<std::io::Error>> {
-
+async fn index(
+    pool: State<'_, Pool<tokio_postgres::NoTls>>,
+) -> Result<content::Json<String>, Debug<std::io::Error>> {
     // run pool in closure
     let _t: Result<_, MyError> = pool
         .run(|mut conn|
@@ -108,24 +103,21 @@ async fn index(pool: State<'_, Pool<tokio_postgres::NoTls>>) -> Result<content::
 
                     // return custom Error as long as your error type impl From<tokio_postgres::Error> and From<tokio_timer::timeout::Elapsed>
                     Ok::<_, MyError>(t)
-                    // or you could use default PollError<PoolError<tokio_postgres::Error>> here
-//                Ok::<_, PoolError<tokio_postgres::Error>>
+                    // or you could use default PollError here
+                    // Ok::<_, PoolError>(t)
                 }
-            )
-        )
+            ))
         .await;
+
+    // pool.get return the Conn and a weak reference of pool so that we can use the connection outside a closure.
+
+    let mut pool_ref = pool.get::<MyError>().await?;
+
+    let (client, statements) = pool_ref.get_conn();
 
     let ids = vec![
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];
-
-    // pool.get return the Conn and a weak reference of pool so that we can use the connection outside a closure.
-
-    let mut pool_ref = pool
-        .get::<MyError>()
-        .await?;
-
-    let (client, statements) = pool_ref.get_conn();
 
     let (t, u): (Vec<Topic>, Vec<u32>) = client
         .query(statements.get(0).unwrap(), &[&ids])
