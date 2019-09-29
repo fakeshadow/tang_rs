@@ -1,5 +1,4 @@
 use futures::TryStreamExt;
-
 use tang_rs::{Builder, PoolError, PostgresConnectionManager};
 
 #[tokio::main]
@@ -38,20 +37,20 @@ async fn main() -> std::io::Result<()> {
 
     let _row = pool
         .run(|mut conn| Box::pin(  // pin the async function to make sure the &mut Conn outlives our closure.
-            async move {
-                let (client, statements) = &mut conn;
+                                   async move {
+                                       let (client, statements) = &mut conn;
 
-                // statement index is the same as the input vector when building the pool.
-                let statement = statements.get(0).unwrap();
+                                       // statement index is the same as the input vector when building the pool.
+                                       let statement = statements.get(0).unwrap();
 
-                let ids = vec![1u32, 2, 3, 4, 5];
+                                       let ids = vec![1u32, 2, 3, 4, 5];
 
-                let row = client
-                    .query(statement, &[&ids])
-                    .try_collect::<Vec<tokio_postgres::Row>>().await?;
+                                       let row = client
+                                           .query(statement, &[&ids])
+                                           .try_collect::<Vec<tokio_postgres::Row>>().await?;
 
-                Ok::<_, PoolError>(row)
-            }
+                                       Ok::<_, PoolError>(row)
+                                   }
         ))
         .await
         .map_err(|e| {
@@ -62,6 +61,27 @@ async fn main() -> std::io::Result<()> {
             };
             std::io::Error::new(std::io::ErrorKind::Other, "place holder error")
         })?;
+
+    // get pool reference and run it outside of a closure
+    let mut pool_ref = pool
+        .get::<PoolError>()
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "place holder error"))?;
+
+    let (client, statements) = pool_ref.get_conn();
+
+    let statement = statements.get(0).unwrap();
+
+    let ids = vec![1u32, 2, 3, 4, 5];
+
+    let _row = client
+        .query(statement, &[&ids])
+        .try_collect::<Vec<tokio_postgres::Row>>()
+        .await
+        .expect("Failed to get row");
+
+    // it's a good thing to drop the pool_ref right after you finished as the connection will be put back to pool when the poo_ref is dropped.
+    drop(pool_ref);
 
     Ok(())
 }

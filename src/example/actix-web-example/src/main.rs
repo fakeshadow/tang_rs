@@ -2,7 +2,7 @@
 extern crate serde_derive;
 
 use actix::prelude::Future as Future01;
-use actix_web::{App, Error, HttpResponse, HttpServer, web};
+use actix_web::{App, Error, error::ErrorInternalServerError, HttpResponse, HttpServer, web};
 use actix_web::web::Data;
 use futures::{FutureExt, TryFutureExt, TryStreamExt};
 use tang_rs::{Builder, Pool, PoolError, PostgresConnectionManager};
@@ -47,55 +47,49 @@ async fn main() -> std::io::Result<()> {
             .data(pool.clone())
             .service(web::resource("/test").route(web::get().to_async(test)))
     })
-    .bind("localhost:8000")
-    .unwrap()
-    .run()
+        .bind("localhost:8000")
+        .unwrap()
+        .run()
 }
 
 fn test(
     pool: Data<Pool<tokio_postgres::NoTls>>,
-) -> impl Future01<Item = HttpResponse, Error = Error> {
+) -> impl Future01<Item=HttpResponse, Error=Error> {
     test_async(pool).boxed_local().compat()
 }
 
 async fn test_async(pool: Data<Pool<tokio_postgres::NoTls>>) -> Result<HttpResponse, Error> {
-    let t = pool
-        .run(|mut c| {
-            Box::pin(async move {
-                let (client, statements) = &mut c;
+    let ids = vec![
+        1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
+    ];
 
-                let ids = vec![
-                    1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
-                ];
+    let mut pool_ref = pool
+        .get::<PoolError>()
+        .await
+        .map_err(|_| ErrorInternalServerError("lol"))?;
 
-                let (t, u): (Vec<Topic>, Vec<u32>) = client
-                    .query(statements.get(0).unwrap(), &[&ids])
-                    .try_fold(
-                        (Vec::with_capacity(20), Vec::with_capacity(20)),
-                        |(mut t, mut u), r| {
-                            u.push(r.get(1));
-                            t.push(r.into());
-                            futures::future::ok((t, u))
-                        },
-                    )
-                    .await?;
+    let (client, statements) = pool_ref.get_conn();
 
-                let _u = client
-                    .query(statements.get(1).unwrap(), &[&u])
-                    .try_collect::<Vec<Row>>()
-                    .await?;
+    let (t, u): (Vec<Topic>, Vec<u32>) = client
+        .query(statements.get(0).unwrap(), &[&ids])
+        .try_fold(
+            (Vec::with_capacity(20), Vec::with_capacity(20)),
+            |(mut t, mut u), r| {
+                u.push(r.get(1));
+                t.push(r.into());
+                futures::future::ok((t, u))
+            },
+        )
+        .await
+        .map_err(|_| ErrorInternalServerError("lol"))?;
 
-                Ok::<_, PoolError>(t)
-            })
-        })
-        .map_err(|e: PoolError| {
-            match e {
-                PoolError::Inner(e) => println!("{:?}", e),
-                PoolError::TimeOut => (),
-            };
-            actix_web::error::ErrorInternalServerError("lol")
-        })
-        .await?;
+    let _u = client
+        .query(statements.get(1).unwrap(), &[&u])
+        .try_collect::<Vec<Row>>()
+        .await
+        .map_err(|_| ErrorInternalServerError("lol"))?;
+
+    drop(pool_ref);
 
     Ok(HttpResponse::Ok().json(&t))
 }

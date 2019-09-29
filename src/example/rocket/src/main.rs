@@ -10,15 +10,16 @@ use std::convert::From;
 use futures::TryStreamExt;
 use rocket::{
     config::{Config, Environment},
-    response::content,
-    State
+    response::{content, Debug},
+    State,
 };
-use tang_rs::{Builder, Pool, PostgresConnectionManager};
 use tokio::runtime::Runtime;
 use tokio_postgres::{
     Row,
-    types::Type
+    types::Type,
 };
+
+use tang_rs::{Builder, Pool, PostgresConnectionManager};
 
 // don't use tokio macro and async main as this will result in nested runtime.
 fn main() {
@@ -72,60 +73,103 @@ fn main() {
 }
 
 #[get("/")]
-async fn index(pool: State<'_, Pool<tokio_postgres::NoTls>>) -> content::Json<String> {
-    let t = pool
-        .run(|mut conn| Box::pin( // pin the async function to make sure the &mut Conn outlives our closure.
-            async move {
-                let (client, statements) = &mut conn;
-                let ids = vec![
+async fn index(pool: State<'_, Pool<tokio_postgres::NoTls>>) -> Result<content::Json<String>, Debug<std::io::Error>> {
+
+    // run pool in closure
+    let _t: Result<_, MyError> = pool
+        .run(|mut conn|
+            // pin the async function to make sure the &mut Conn outlives our closure.
+            Box::pin(
+                async move {
+                    let (client, statements) = &mut conn;
+                    let ids = vec![
                         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
                     ];
 
-                // statement index is the same as the input vector when building the pool.
-                let statement = statements.get(0).unwrap();
+                    // statement index is the same as the input vector when building the pool.
+                    let statement = statements.get(0).unwrap();
 
-                let (t, u): (Vec<Topic>, Vec<u32>) = client
-                    .query(statement, &[&ids])
-                    .try_fold(
-                        (Vec::with_capacity(20), Vec::with_capacity(20)),
-                        |(mut t, mut u), r| {
-                            u.push(r.get(1));
-                            t.push(r.into());
-                            futures::future::ok((t, u))
-                        }
-                    )
-                    .await?;
+                    let (t, u): (Vec<Topic>, Vec<u32>) = client
+                        .query(statement, &[&ids])
+                        .try_fold(
+                            (Vec::with_capacity(20), Vec::with_capacity(20)),
+                            |(mut t, mut u), r| {
+                                u.push(r.get(1));
+                                t.push(r.into());
+                                futures::future::ok((t, u))
+                            },
+                        )
+                        .await?;
 
-                let _u = client
-                    .query(statements.get(1).unwrap(), &[&u])
-                    .try_collect::<Vec<Row>>()
-                    .await?;
+                    let _u = client
+                        .query(statements.get(1).unwrap(), &[&u])
+                        .try_collect::<Vec<Row>>()
+                        .await?;
 
-                // return custom Error as long as your error type impl From<tokio_postgres::Error> and From<tokio_timer::timeout::Elapsed>
-                Ok::<_, MyError>(t)
-                // or you could use default PollError<PoolError<tokio_postgres::Error>> here
+                    // return custom Error as long as your error type impl From<tokio_postgres::Error> and From<tokio_timer::timeout::Elapsed>
+                    Ok::<_, MyError>(t)
+                    // or you could use default PollError<PoolError<tokio_postgres::Error>> here
 //                Ok::<_, PoolError<tokio_postgres::Error>>
-            }
-        ))
-        .await
-        .unwrap_or_else(|_e: MyError| vec![]);
+                }
+            )
+        )
+        .await;
 
-    content::Json(serde_json::to_string(&t).unwrap())
+    let ids = vec![
+        1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
+    ];
+
+    // pool.get return the Conn and a weak reference of pool so that we can use the connection outside a closure.
+
+    let mut pool_ref = pool
+        .get::<MyError>()
+        .await?;
+
+    let (client, statements) = pool_ref.get_conn();
+
+    let (t, u): (Vec<Topic>, Vec<u32>) = client
+        .query(statements.get(0).unwrap(), &[&ids])
+        .try_fold(
+            (Vec::with_capacity(20), Vec::with_capacity(20)),
+            |(mut t, mut u), r| {
+                u.push(r.get(1));
+                t.push(r.into());
+                futures::future::ok((t, u))
+            },
+        )
+        .await
+        .map_err(MyError::from)?;
+
+    let _u = client
+        .query(statements.get(1).unwrap(), &[&u])
+        .try_collect::<Vec<Row>>()
+        .await
+        .map_err(MyError::from)?;
+
+    drop(pool_ref); // drop the pool_ref when you finish use the pool. so that the connection can be put back to pool asap.
+
+    Ok(content::Json(serde_json::to_string(&t).unwrap()))
 }
 
 struct MyError;
 
 impl From<tokio_postgres::Error> for MyError {
-    fn from(_e:tokio_postgres::Error ) -> MyError {
+    fn from(_e: tokio_postgres::Error) -> MyError {
         MyError
     }
 }
+
 impl From<tokio::timer::timeout::Elapsed> for MyError {
     fn from(_e: tokio::timer::timeout::Elapsed) -> MyError {
         MyError
     }
 }
 
+impl From<MyError> for Debug<std::io::Error> {
+    fn from(_m: MyError) -> Debug<std::io::Error> {
+        Debug(std::io::Error::new(std::io::ErrorKind::TimedOut, "oh no!"))
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Topic {

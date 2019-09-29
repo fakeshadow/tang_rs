@@ -81,7 +81,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -299,6 +299,72 @@ impl<Tls: MakeTlsConnect<Socket>> fmt::Debug for Pool<Tls> {
     }
 }
 
+pub struct PoolRef<Tls>
+where
+    Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
+    <Tls as MakeTlsConnect<Socket>>::Stream: Send,
+    <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
+    <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    conn: Option<Conn>,
+    pool: Weak<SharedPool<Tls>>,
+}
+
+impl<Tls> PoolRef<Tls>
+where
+    Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
+    <Tls as MakeTlsConnect<Socket>>::Stream: Send,
+    <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
+    <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    pub fn get_conn(&mut self) -> &mut (Client, Vec<Statement>) {
+        &mut self.conn.as_mut().unwrap().conn
+    }
+}
+
+impl<Tls> Drop for PoolRef<Tls>
+where
+    Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
+    <Tls as MakeTlsConnect<Socket>>::Stream: Send,
+    <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
+    <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    fn drop(&mut self) {
+        if let Some(shared_pool) = self.pool.upgrade() {
+            let mut conn = self.conn.take().unwrap();
+
+            #[cfg(feature = "actix-web")]
+            actix_rt::spawn(
+                async move {
+                    let broken = shared_pool.manager.is_closed(&mut conn.conn.0);
+                    let mut inner = shared_pool.pool.lock();
+                    if broken {
+                        let _r = inner.drop_connections(&shared_pool, vec![conn]).await;
+                    } else {
+                        IDLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+                        inner.conns.push_back(conn.into());
+                    };
+                    Ok(())
+                }
+                    .boxed_local()
+                    .compat(),
+            );
+
+            #[cfg(feature = "default")]
+            tokio_executor::spawn(async move {
+                let broken = shared_pool.manager.is_closed(&mut conn.conn.0);
+                let mut inner = shared_pool.pool.lock().await;
+                if broken {
+                    let _r = inner.drop_connections(&shared_pool, vec![conn]).await;
+                } else {
+                    IDLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+                    inner.conns.push_back(conn.into());
+                }
+            });
+        }
+    }
+}
+
 impl<Tls> Pool<Tls>
 where
     Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
@@ -332,6 +398,41 @@ where
         let mut inner = self.0.pool.lock().await;
 
         inner.replenish_idle_connections_locked(&self.0).await
+    }
+
+    #[cfg(feature = "default")]
+    pub async fn get<E>(&self) -> Result<PoolRef<Tls>, E>
+    where
+        E: From<Error> + From<tokio_timer::timeout::Elapsed>,
+    {
+        let conn = Timeout::new(
+            self.get_idle_connection(),
+            self.0.statics.connection_timeout,
+        )
+        .await??;
+
+        Ok(PoolRef {
+            conn: Some(conn),
+            pool: Arc::downgrade(&self.0),
+        })
+    }
+
+    #[cfg(feature = "actix-web")]
+    pub async fn get<E>(&self) -> Result<PoolRef<Tls>, E>
+    where
+        E: From<Error> + From<tokio_timer01::timeout::Error<Error>>,
+    {
+        let conn = Timeout::new(
+            self.get_idle_connection().boxed_local().compat(),
+            self.0.statics.connection_timeout,
+        )
+        .compat()
+        .await?;
+
+        Ok(PoolRef {
+            conn: Some(conn),
+            pool: Arc::downgrade(&self.0),
+        })
     }
 
     #[cfg(feature = "default")]
