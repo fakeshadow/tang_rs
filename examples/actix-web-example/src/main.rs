@@ -28,7 +28,7 @@ async fn main() -> std::io::Result<()> {
 
     // setup manager
     // only support NoTls for now
-    let mgr = PostgresManager::new_from_stringlike(db_url, statements, tokio_postgres::NoTls)
+    let mgr = PostgresManager::new_from_stringlike(db_url, statements, NoTls)
         .unwrap_or_else(|_| panic!("can't make postgres manager"));
 
     /*
@@ -56,8 +56,8 @@ async fn main() -> std::io::Result<()> {
         .always_check(false)
         .idle_timeout(None)
         .max_lifetime(None)
-        .min_idle(12) // too many redis connection is not a good thing and could have negative impact on performance.
-        .max_size(12) // so one connection for one worker is more than enough.
+        .min_idle(24) // too many redis connection is not a good thing and could have negative impact on performance.
+        .max_size(24) // so one connection for one worker is more than enough.
         .build(mgr)
         .await
         .unwrap_or_else(|_| panic!("can't make redis pool"));

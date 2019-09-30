@@ -33,8 +33,7 @@ fn main() {
     ];
 
     // setup manager
-    // only support NoTls for now
-    let mgr = PostgresManager::new_from_stringlike(db_url, statements, tokio_postgres::NoTls)
+    let mgr = PostgresManager::new_from_stringlike(db_url, statements, tokio_postgres::NoTls) // pass Some(tls) here
         .unwrap_or_else(|_| panic!("can't make postgres manager"));
 
     // build postgres pool

@@ -83,7 +83,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam_queue::{ArrayQueue, SegQueue};
@@ -109,9 +109,6 @@ mod manager;
 mod postgres_tang;
 #[cfg(feature = "redis")]
 mod redis_tang;
-
-static SPAWNED_COUNTER: AtomicUsize = AtomicUsize::new(0);
-static PENDING_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 pub struct Conn<M: Manager> {
     pub conn: M::Connection,
@@ -159,9 +156,35 @@ struct SharedPool<M: Manager> {
     manager: M,
     pool: ArrayQueue<IdleConn<M>>,
     queue: SegQueue<Sender<Conn<M>>>,
+    spawned: AtomicUsize,
+    pending: AtomicUsize,
 }
 
 impl<M: Manager> SharedPool<M> {
+    fn decr_spawn(&self, count: usize) {
+        self.spawned.fetch_sub(count, Ordering::SeqCst);
+    }
+
+    fn incr_spawn(&self, count: usize) {
+        self.spawned.fetch_add(count, Ordering::SeqCst);
+    }
+
+    fn load_spawn(&self) -> usize {
+        self.spawned.load(Ordering::SeqCst)
+    }
+
+    fn decr_pending(&self, count: usize) {
+        self.pending.fetch_sub(count, Ordering::SeqCst);
+    }
+
+    fn incr_pending(&self, count: usize) {
+        self.pending.fetch_add(count, Ordering::SeqCst);
+    }
+
+    fn load_pending(&self) -> usize {
+        self.pending.load(Ordering::SeqCst)
+    }
+
     fn put_back_conn(&self, conn: Conn<M>) {
         let mut conn = conn;
         while let Ok(tx) = self.queue.pop() {
@@ -174,17 +197,17 @@ impl<M: Manager> SharedPool<M> {
         }
 
         if self.pool.push(conn.into()).is_err() {
-            SPAWNED_COUNTER.fetch_sub(1, Ordering::SeqCst);
+            self.decr_spawn(1);
         }
     }
 
     // ToDo: spawn this method in thread pool
     async fn drop_connections(&self, to_drop: Vec<Conn<M>>) -> Result<(), M::Error> {
-        SPAWNED_COUNTER.fetch_sub(to_drop.len(), Ordering::SeqCst);
+        self.decr_spawn(to_drop.len());
         // We might need to spin up more connections to maintain the idle limit, e.g.
         // if we hit connection lifetime limits
         let min = self.statics.min_idle as usize;
-        if SPAWNED_COUNTER.load(Ordering::SeqCst) < min {
+        if self.load_spawn() < min {
             self.replenish_idle_connections().await
         } else {
             Ok(())
@@ -193,14 +216,14 @@ impl<M: Manager> SharedPool<M> {
 
     // ToDo: spawn this method in thread pool
     async fn add_connection(&self) -> Result<(), M::Error> {
-        PENDING_COUNTER.fetch_add(1, Ordering::SeqCst);
+        self.incr_pending(1);
         let conn = self.manager.connect().await.map_err(|e| {
-            PENDING_COUNTER.fetch_sub(1, Ordering::SeqCst);
+            self.decr_pending(1);
             e
         })?;
 
-        PENDING_COUNTER.fetch_sub(1, Ordering::SeqCst);
-        SPAWNED_COUNTER.fetch_add(1, Ordering::SeqCst);
+        self.decr_pending(1);
+        self.incr_spawn(1);
 
         let conn = IdleConn::new(conn);
 
@@ -210,8 +233,8 @@ impl<M: Manager> SharedPool<M> {
     }
 
     async fn replenish_idle_connections(&self) -> Result<(), M::Error> {
-        let pending = PENDING_COUNTER.load(Ordering::SeqCst) as u8;
-        let spawned = SPAWNED_COUNTER.load(Ordering::SeqCst) as u8;
+        let pending = self.load_pending() as u8;
+        let spawned = self.load_spawn() as u8;
 
         let slots_available = self.statics.max_size - spawned - pending;
 
@@ -271,6 +294,8 @@ impl<M: Manager> Pool<M> {
             manager,
             pool: ArrayQueue::new(size),
             queue: SegQueue::new(),
+            spawned: AtomicUsize::new(0),
+            pending: AtomicUsize::new(0),
         });
 
         // spawn a loop interval future to handle the lifetime and time out of connections.
@@ -282,7 +307,7 @@ impl<M: Manager> Pool<M> {
     /// `pool.get()` return a reference of pool and a Conn. So that you can use the Conn outside a closure.
     /// The limitation is we can't figure out if your get a error when use the Conn and make conditional broken check before push the Conn back to pool
     #[cfg(feature = "default")]
-    pub async fn get<E>(&self) -> Result<PoolRef<M>, E>
+    pub async fn get<'a, E>(&'a self) -> Result<PoolRef<'a, M>, E>
     where
         E: From<M::Error> + From<tokio_timer::timeout::Elapsed>,
     {
@@ -294,12 +319,12 @@ impl<M: Manager> Pool<M> {
 
         Ok(PoolRef {
             conn: Some(conn),
-            pool: Arc::downgrade(&self.0),
+            pool: &self.0,
         })
     }
 
     #[cfg(feature = "actix-web")]
-    pub async fn get<E>(&self) -> Result<PoolRef<M>, E>
+    pub async fn get<'a, E>(&'a self) -> Result<PoolRef<'a, M>, E>
     where
         E: From<M::Error> + From<tokio_timer01::timeout::Error<M::Error>>,
     {
@@ -312,7 +337,7 @@ impl<M: Manager> Pool<M> {
 
         Ok(PoolRef {
             conn: Some(conn),
-            pool: Arc::downgrade(&self.0),
+            pool: &self.0,
         })
     }
 
@@ -387,8 +412,7 @@ impl<M: Manager> Pool<M> {
             let mut conn = match self.0.pool.pop() {
                 Ok(conn) => conn.into(),
                 Err(_) => {
-                    if (PENDING_COUNTER.load(Ordering::SeqCst)
-                        + SPAWNED_COUNTER.load(Ordering::SeqCst))
+                    if (self.0.load_pending() + self.0.load_spawn())
                         < self.0.statics.max_size as usize
                     {
                         let _r = self.0.add_connection().await;
@@ -405,9 +429,7 @@ impl<M: Manager> Pool<M> {
             };
 
             // Spin up a new connection if necessary to retain our minimum idle count
-            if (PENDING_COUNTER.load(Ordering::SeqCst) + SPAWNED_COUNTER.load(Ordering::SeqCst))
-                < self.0.statics.min_idle as usize
-            {
+            if (self.0.load_pending() + self.0.load_spawn()) < self.0.statics.min_idle as usize {
                 let _r = self.0.replenish_idle_connections().await;
             }
 
@@ -424,7 +446,7 @@ impl<M: Manager> Pool<M> {
 
     pub async fn state(&self) -> State {
         State {
-            connections: SPAWNED_COUNTER.load(Ordering::Relaxed) as u8,
+            connections: self.0.load_spawn() as u8,
             idle_connections: self.0.pool.len() as u8,
         }
     }
@@ -444,49 +466,45 @@ impl fmt::Debug for State {
     }
 }
 
-pub struct PoolRef<M: Manager> {
+pub struct PoolRef<'a, M: Manager> {
     conn: Option<Conn<M>>,
-    pool: Weak<SharedPool<M>>,
+    pool: &'a Arc<SharedPool<M>>,
 }
 
-impl<M: Manager> PoolRef<M> {
+impl<'a, M: Manager> PoolRef<'a, M> {
     pub fn get_conn(&mut self) -> &mut M::Connection {
         &mut self.conn.as_mut().unwrap().conn
     }
 }
 
-impl<M: Manager> Drop for PoolRef<M> {
+impl<'a, M: Manager> Drop for PoolRef<'a, M> {
     fn drop(&mut self) {
-        if let Some(shared_pool) = self.pool.upgrade() {
-            let mut conn = self.conn.take().unwrap();
-
-            #[cfg(feature = "actix-web")]
-            actix_rt::spawn(
-                async move {
-                    let broken = shared_pool.manager.is_closed(&mut conn.conn);
-                    if broken {
-                        let _r = shared_pool.drop_connections(vec![conn]).await;
-                    } else {
-                        shared_pool.put_back_conn(conn);
-                    };
-                    Ok(())
-                }
-                    .boxed_local()
-                    .compat(),
-            );
-
-            #[cfg(feature = "default")]
-            tokio_executor::spawn(async move {
+        let mut conn = self.conn.take().unwrap();
+        let shared_pool = self.pool.clone();
+        #[cfg(feature = "actix-web")]
+        actix_rt::spawn(
+            async move {
                 let broken = shared_pool.manager.is_closed(&mut conn.conn);
                 if broken {
                     let _r = shared_pool.drop_connections(vec![conn]).await;
                 } else {
                     shared_pool.put_back_conn(conn);
-                }
-            });
-        } else {
-            SPAWNED_COUNTER.fetch_sub(1, Ordering::SeqCst);
-        }
+                };
+                Ok(())
+            }
+                .boxed_local()
+                .compat(),
+        );
+
+        #[cfg(feature = "default")]
+        tokio_executor::spawn(async move {
+            let broken = shared_pool.manager.is_closed(&mut conn.conn);
+            if broken {
+                let _r = shared_pool.drop_connections(vec![conn]).await;
+            } else {
+                shared_pool.put_back_conn(conn);
+            }
+        });
     }
 }
 
@@ -494,14 +512,12 @@ impl<M: Manager> Drop for PoolRef<M> {
 fn schedule_one_reaping<M: Manager>(shared: &Arc<SharedPool<M>>) {
     if shared.statics.max_lifetime.is_some() || shared.statics.idle_timeout.is_some() {
         let mut interval = Interval::new_interval(shared.statics.reaper_rate);
-        let weak_shared = Arc::downgrade(&shared);
+        let shared = shared.clone();
 
         tokio_executor::spawn(async move {
             loop {
                 let _i = interval.next().await;
-                if let Some(shared) = weak_shared.upgrade() {
-                    let _ = shared.reap_connections().await;
-                };
+                let _ = shared.reap_connections().await;
             }
         });
     }
