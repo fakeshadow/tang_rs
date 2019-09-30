@@ -1,8 +1,9 @@
 [package]
 name = "tang-example-raw"
 version = "0.1.0"
-authors = ["fakeshadow <24548779@qq.com>"]
+workspace = "../../"
 edition = "2018"
+publish = false
 
 [dependencies.futures-preview]
 version = "0.3.0-alpha.18"
@@ -16,5 +17,9 @@ features = [ "io", "codec", "fs" ]
 [dependencies.tokio-postgres]
 git = "https://github.com/sfackler/rust-postgres"
 
+[dependencies.redis]
+git = "https://github.com/Marwes/redis-rs.git"
+branch = "std_future"
+
 [dependencies.tang-rs]
-path = "../../../"
+path = "../../"

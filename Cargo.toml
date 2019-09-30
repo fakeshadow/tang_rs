@@ -15,8 +15,16 @@ name = "tang_rs"
 path = "src/lib.rs"
 
 [features]
-default = [ "tokio-timer", "tokio-executor" ]
-actix-web = [ "tokio-timer", "tokio-timer01", "tokio-executor", "actix-rt" ]
+default = [ "tokio-timer", "tokio-executor", "tokio-postgres", "redis" ]
+actix-web = [ "tokio-timer", "tokio-timer01", "tokio-executor", "actix-rt", "tokio-postgres", "redis" ]
+
+
+[workspace]
+members = [
+  "examples/actix-web-example",
+  "examples/rocket",
+  "examples/raw",
+]
 
 
 [dependencies.actix-rt]
@@ -44,4 +52,10 @@ version = "=0.2.11"
 optional = true
 
 [dependencies.tokio-postgres]
+optional = true
 git = "https://github.com/sfackler/rust-postgres"
+
+[dependencies.redis]
+optional = true
+git = "https://github.com/Marwes/redis-rs.git"
+branch = "std_future"

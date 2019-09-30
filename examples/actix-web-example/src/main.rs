@@ -8,16 +8,16 @@ use actix_web::{
     App, Error, HttpResponse, HttpServer,
 };
 use futures::{FutureExt, TryFutureExt, TryStreamExt};
-use tang_rs::{Builder, Pool, PoolError, PostgresConnectionManager};
-use tokio_postgres::types::Type;
-use tokio_postgres::Row;
+use tokio_postgres::{types::Type, NoTls, Row};
+
+use tang_rs::{Builder, Pool, PostgresManager, PostgresPoolError, RedisManager, RedisPoolError};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let db_url = "postgres://postgres:123@localhost/test";
-    let mgr = PostgresConnectionManager::new_from_stringlike(db_url, tokio_postgres::NoTls)
-        .unwrap_or_else(|_| panic!("can't make postgres manager"));
 
+    // make prepared statements. pass Vec<tokio_postgres::types::Type> if you want typed statement. pass vec![] for no typed statement.
+    // pass vec![] if you don't want any prepared statements.
     let statements = vec![
         (
             "SELECT * FROM topics WHERE id=ANY($1)",
@@ -25,6 +25,11 @@ async fn main() -> std::io::Result<()> {
         ),
         ("SELECT * FROM users WHERE id=ANY($1)", vec![]),
     ];
+
+    // setup manager
+    // only support NoTls for now
+    let mgr = PostgresManager::new_from_stringlike(db_url, statements, tokio_postgres::NoTls)
+        .unwrap_or_else(|_| panic!("can't make postgres manager"));
 
     /*
         limitation:
@@ -41,15 +46,28 @@ async fn main() -> std::io::Result<()> {
         .max_lifetime(None)
         .min_idle(24)
         .max_size(24)
-        .prepare_statements(statements)
         .build(mgr)
         .await
         .unwrap_or_else(|_| panic!("can't make pool"));
 
+    let mgr = RedisManager::new("redis://127.0.0.1");
+
+    let pool_redis = Builder::new()
+        .always_check(false)
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .min_idle(12) // too many redis connection is not a good thing and could have negative impact on performance.
+        .max_size(12) // so one connection for one worker is more than enough.
+        .build(mgr)
+        .await
+        .unwrap_or_else(|_| panic!("can't make redis pool"));
+
     HttpServer::new(move || {
         App::new()
             .data(pool.clone())
+            .data(pool_redis.clone())
             .service(web::resource("/test").route(web::get().to_async(test)))
+            .service(web::resource("/test/redis").route(web::get().to_async(test_redis)))
     })
     .bind("localhost:8000")
     .unwrap()
@@ -57,18 +75,18 @@ async fn main() -> std::io::Result<()> {
 }
 
 fn test(
-    pool: Data<Pool<tokio_postgres::NoTls>>,
+    pool: Data<Pool<PostgresManager<NoTls>>>,
 ) -> impl Future01<Item = HttpResponse, Error = Error> {
     test_async(pool).boxed_local().compat()
 }
 
-async fn test_async(pool: Data<Pool<tokio_postgres::NoTls>>) -> Result<HttpResponse, Error> {
+async fn test_async(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResponse, Error> {
     let ids = vec![
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];
 
     let mut pool_ref = pool
-        .get::<PoolError>()
+        .get::<PostgresPoolError>()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 
@@ -96,6 +114,33 @@ async fn test_async(pool: Data<Pool<tokio_postgres::NoTls>>) -> Result<HttpRespo
     drop(pool_ref);
 
     Ok(HttpResponse::Ok().json(&t))
+}
+
+fn test_redis(pool: Data<Pool<RedisManager>>) -> impl Future01<Item = HttpResponse, Error = Error> {
+    test_redisasync(pool).boxed_local().compat()
+}
+
+async fn test_redisasync(pool: Data<Pool<RedisManager>>) -> Result<HttpResponse, Error> {
+    // you can also run code in closure like postgres pool. we skip that here.
+
+    // Your Error type have to impl From<redis::RedisError> or you can use default error type tang_rs::RedisPoolError
+    let mut pool_ref = pool
+        .get::<RedisPoolError>()
+        .await
+        .map_err(|_| ErrorInternalServerError("lol"))?;
+
+    let client = pool_ref.get_conn();
+
+    // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
+    // the client var we shadowed is from redis query return and last till the function end.
+    let (client, ()) = redis::cmd("PING")
+        .query_async(client.clone())
+        .await
+        .map_err(|_| ErrorInternalServerError("lol"))?;
+
+    drop(pool_ref);
+
+    Ok(HttpResponse::Ok().finish())
 }
 
 #[derive(Serialize, Deserialize, Debug)]

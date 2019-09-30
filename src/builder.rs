@@ -1,12 +1,7 @@
 use std::time::Duration;
 
-use tokio_postgres::{
-    tls::{MakeTlsConnect, TlsConnect},
-    types::Type,
-    Error, Socket,
-};
-
-use crate::{postgres::PreparedStatement, Pool, PostgresConnectionManager};
+use crate::manager::Manager;
+use crate::Pool;
 
 pub struct Builder {
     pub(crate) max_size: u8,
@@ -18,7 +13,6 @@ pub struct Builder {
     pub(crate) connection_timeout: Duration,
     /// The time interval used to wake up and reap connections.
     pub(crate) reaper_rate: Duration,
-    pub(crate) statements: Vec<PreparedStatement>,
 }
 
 impl Default for Builder {
@@ -31,7 +25,6 @@ impl Default for Builder {
             idle_timeout: Some(Duration::from_secs(10 * 60)),
             connection_timeout: Duration::from_secs(10),
             reaper_rate: Duration::from_secs(15),
-            statements: vec![],
         }
     }
 }
@@ -106,38 +99,8 @@ impl Builder {
         self
     }
 
-    /// prepared statements can be passed when connecting to speed up frequent used queries.
-    /// example:
-    /// ```rust
-    /// use tokio_postgres::types::Type;
-    ///
-    /// let statements = vec![
-    ///     ("SELECT * from table WHERE id = $1".to_owned(), vec![Type::OID]),
-    ///     ("SELECT * from table2 WHERE id = $1", vec![]) // pass empty vec if you don't want a type specific prepare.
-    /// ];
-    /// let builder = crate::Builder::new().prepare_statements(statements);
-    /// ```
-    pub fn prepare_statements(mut self, statements: Vec<(&str, Vec<Type>)>) -> Self {
-        let statements = statements
-            .into_iter()
-            .map(|p| p.into())
-            .collect::<Vec<PreparedStatement>>();
-
-        self.statements = statements;
-        self
-    }
-
     /// Consumes the builder, returning a new, initialized `Pool`.
-    pub async fn build<Tls>(
-        self,
-        manager: PostgresConnectionManager<Tls>,
-    ) -> Result<Pool<Tls>, Error>
-    where
-        Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
-        <Tls as MakeTlsConnect<Socket>>::Stream: Send,
-        <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
-        <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
-    {
+    pub async fn build<M: Manager>(self, manager: M) -> Result<Pool<M>, M::Error> {
         assert!(
             self.max_size >= self.min_idle,
             "min_idle must be no larger than max_size"

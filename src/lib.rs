@@ -12,32 +12,33 @@
 //! # Example:
 //!``` rust
 //!use futures::TryStreamExt;
-//!use tang_rs::{Builder, PoolError, PostgresConnectionManager};
+//!use tang_rs::{Builder, PoolError, PostgresManager};
 //!
 //!#[tokio::main]
 //!async fn main() -> std::io::Result<()> {
 //!    let db_url = "postgres://postgres:123@localhost/test";
-//!    // setup manager
-//!    // only support NoTls for now
-//!    let mgr =
-//!        PostgresConnectionManager::new_from_stringlike(
-//!            db_url,
-//!            tokio_postgres::NoTls,
-//!        ).unwrap_or_else(|_| panic!("can't make postgres manager"));
 //!    // make prepared statements. pass Vec<tokio_postgres::types::Type> if you want typed statement. pass vec![] for no typed statement.
-//!    // ignore if you don't need any prepared statements.
+//!    // pass vec![] if you don't need any prepared statements.
 //!    let statements = vec![
 //!            ("SELECT * FROM topics WHERE id=ANY($1)", vec![tokio_postgres::types::Type::OID_ARRAY]),
 //!            ("SELECT * FROM posts WHERE id=ANY($1)", vec![])
 //!        ];
+//!
+//!    // setup manager
+//!    // only support NoTls for now
+//!    let mgr =
+//!        PostgresManager::new_from_stringlike(
+//!            db_url,
+//!            statements,
+//!            tokio_postgres::NoTls,
+//!        ).unwrap_or_else(|_| panic!("can't make postgres manager"));
 //!    // make pool
 //!    let pool = Builder::new()
 //!        .always_check(false) // if set true every connection will be checked before checkout.
 //!        .idle_timeout(None) // set idle_timeout and max_lifetime both to None to ignore idle connection drop.
 //!        .max_lifetime(None)
-//!        .min_idle(1)   // when working with heavy load the min_idle count should be set a higher count close to max_size.
+//!        .min_idle(1)
 //!        .max_size(12)
-//!        .prepare_statements(statements)
 //!        .build(mgr)
 //!        .await
 //!        .unwrap_or_else(|_| panic!("can't make pool"));
@@ -89,10 +90,6 @@ use crossbeam_queue::{ArrayQueue, SegQueue};
 use futures::channel::oneshot::{channel, Sender};
 #[cfg(feature = "actix-web")]
 use futures::{compat::Future01CompatExt, FutureExt, TryFutureExt};
-use tokio_postgres::{
-    tls::{MakeTlsConnect, TlsConnect},
-    Client, Error, Socket, Statement,
-};
 use tokio_timer::Interval;
 #[cfg(feature = "default")]
 use tokio_timer::Timeout;
@@ -100,29 +97,34 @@ use tokio_timer::Timeout;
 use tokio_timer01::Timeout;
 
 pub use builder::Builder;
-pub use error::PoolError;
-pub use postgres::PostgresConnectionManager;
+pub use manager::Manager;
+#[cfg(feature = "tokio-postgres")]
+pub use postgres_tang::{PostgresManager, PostgresPoolError};
+#[cfg(feature = "redis")]
+pub use redis_tang::{RedisManager, RedisPoolError};
 
 mod builder;
-mod error;
-mod postgres;
+mod manager;
+#[cfg(feature = "tokio-postgres")]
+mod postgres_tang;
+#[cfg(feature = "redis")]
+mod redis_tang;
 
 static SPAWNED_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static PENDING_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Conn type contains connection itself and prepared statements for this connection.
-pub struct Conn {
-    pub conn: (Client, Vec<Statement>),
+pub struct Conn<M: Manager> {
+    pub conn: M::Connection,
     birth: Instant,
 }
 
-pub struct IdleConn {
-    conn: Conn,
+pub struct IdleConn<M: Manager> {
+    conn: Conn<M>,
     idle_start: Instant,
 }
 
-impl IdleConn {
-    fn new(conn: (Client, Vec<Statement>)) -> Self {
+impl<M: Manager> IdleConn<M> {
+    fn new(conn: M::Connection) -> Self {
         let now = Instant::now();
         IdleConn {
             conn: Conn { conn, birth: now },
@@ -131,8 +133,8 @@ impl IdleConn {
     }
 }
 
-impl From<Conn> for IdleConn {
-    fn from(conn: Conn) -> IdleConn {
+impl<M: Manager> From<Conn<M>> for IdleConn<M> {
+    fn from(conn: Conn<M>) -> IdleConn<M> {
         let now = Instant::now();
         IdleConn {
             conn,
@@ -141,8 +143,8 @@ impl From<Conn> for IdleConn {
     }
 }
 
-impl From<IdleConn> for Conn {
-    fn from(conn: IdleConn) -> Conn {
+impl<M: Manager> From<IdleConn<M>> for Conn<M> {
+    fn from(conn: IdleConn<M>) -> Conn<M> {
         Conn {
             conn: conn.conn.conn,
             birth: conn.conn.birth,
@@ -152,21 +154,15 @@ impl From<IdleConn> for Conn {
 
 /// use future aware mutex for inner Pool lock.
 /// So the waiter queue is handled by the mutex lock and not the pool.
-struct SharedPool<Tls: MakeTlsConnect<Socket>> {
+struct SharedPool<M: Manager> {
     statics: Builder,
-    manager: PostgresConnectionManager<Tls>,
-    pool: ArrayQueue<IdleConn>,
-    queue: SegQueue<Sender<Conn>>,
+    manager: M,
+    pool: ArrayQueue<IdleConn<M>>,
+    queue: SegQueue<Sender<Conn<M>>>,
 }
 
-impl<Tls> SharedPool<Tls>
-where
-    Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
-    <Tls as MakeTlsConnect<Socket>>::Stream: Send,
-    <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
-    <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
-{
-    fn put_back_conn(&self, conn: Conn) {
+impl<M: Manager> SharedPool<M> {
+    fn put_back_conn(&self, conn: Conn<M>) {
         let mut conn = conn;
         while let Ok(tx) = self.queue.pop() {
             match tx.send(conn) {
@@ -183,7 +179,7 @@ where
     }
 
     // ToDo: spawn this method in thread pool
-    async fn drop_connections(&self, to_drop: Vec<Conn>) -> Result<(), Error> {
+    async fn drop_connections(&self, to_drop: Vec<Conn<M>>) -> Result<(), M::Error> {
         SPAWNED_COUNTER.fetch_sub(to_drop.len(), Ordering::SeqCst);
         // We might need to spin up more connections to maintain the idle limit, e.g.
         // if we hit connection lifetime limits
@@ -196,16 +192,12 @@ where
     }
 
     // ToDo: spawn this method in thread pool
-    async fn add_connection(&self) -> Result<(), Error> {
+    async fn add_connection(&self) -> Result<(), M::Error> {
         PENDING_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let conn = self
-            .manager
-            .connect(&self.statics.statements)
-            .await
-            .map_err(|e| {
-                PENDING_COUNTER.fetch_sub(1, Ordering::SeqCst);
-                e
-            })?;
+        let conn = self.manager.connect().await.map_err(|e| {
+            PENDING_COUNTER.fetch_sub(1, Ordering::SeqCst);
+            e
+        })?;
 
         PENDING_COUNTER.fetch_sub(1, Ordering::SeqCst);
         SPAWNED_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -217,7 +209,7 @@ where
         Ok(())
     }
 
-    async fn replenish_idle_connections(&self) -> Result<(), Error> {
+    async fn replenish_idle_connections(&self) -> Result<(), M::Error> {
         let pending = PENDING_COUNTER.load(Ordering::SeqCst) as u8;
         let spawned = SPAWNED_COUNTER.load(Ordering::SeqCst) as u8;
 
@@ -233,7 +225,7 @@ where
         Ok(())
     }
 
-    async fn reap_connections(&self) -> Result<(), Error> {
+    async fn reap_connections(&self) -> Result<(), M::Error> {
         let now = Instant::now();
 
         if let Ok(conn) = self.pool.pop() {
@@ -256,28 +248,22 @@ where
     }
 }
 
-pub struct Pool<Tls: MakeTlsConnect<Socket>>(Arc<SharedPool<Tls>>);
+pub struct Pool<M: Manager>(Arc<SharedPool<M>>);
 
-impl<Tls: MakeTlsConnect<Socket>> Clone for Pool<Tls> {
+impl<M: Manager> Clone for Pool<M> {
     fn clone(&self) -> Self {
         Pool(self.0.clone())
     }
 }
 
-impl<Tls: MakeTlsConnect<Socket>> fmt::Debug for Pool<Tls> {
+impl<M: Manager> fmt::Debug for Pool<M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_fmt(format_args!("Pool({:p})", self.0))
     }
 }
 
-impl<Tls> Pool<Tls>
-where
-    Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
-    <Tls as MakeTlsConnect<Socket>>::Stream: Send,
-    <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
-    <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
-{
-    fn new_inner(builder: Builder, manager: PostgresConnectionManager<Tls>) -> Self {
+impl<M: Manager> Pool<M> {
+    fn new_inner(builder: Builder, manager: M) -> Self {
         let size = builder.max_size as usize;
 
         let shared_pool = Arc::new(SharedPool {
@@ -296,9 +282,9 @@ where
     /// `pool.get()` return a reference of pool and a Conn. So that you can use the Conn outside a closure.
     /// The limitation is we can't figure out if your get a error when use the Conn and make conditional broken check before push the Conn back to pool
     #[cfg(feature = "default")]
-    pub async fn get<E>(&self) -> Result<PoolRef<Tls>, E>
+    pub async fn get<E>(&self) -> Result<PoolRef<M>, E>
     where
-        E: From<Error> + From<tokio_timer::timeout::Elapsed>,
+        E: From<M::Error> + From<tokio_timer::timeout::Elapsed>,
     {
         let conn = Timeout::new(
             self.get_idle_connection(),
@@ -313,9 +299,9 @@ where
     }
 
     #[cfg(feature = "actix-web")]
-    pub async fn get<E>(&self) -> Result<PoolRef<Tls>, E>
+    pub async fn get<E>(&self) -> Result<PoolRef<M>, E>
     where
-        E: From<Error> + From<tokio_timer01::timeout::Error<Error>>,
+        E: From<M::Error> + From<tokio_timer01::timeout::Error<M::Error>>,
     {
         let conn = Timeout::new(
             self.get_idle_connection().boxed_local().compat(),
@@ -333,11 +319,9 @@ where
     #[cfg(feature = "default")]
     pub async fn run<T, E, EE, F>(&self, f: F) -> Result<T, E>
     where
-        F: FnOnce(
-            &mut (Client, Vec<Statement>),
-        ) -> Pin<Box<dyn Future<Output = Result<T, EE>> + Send + '_>>,
-        EE: From<Error>,
-        E: From<EE> + From<tokio_timer::timeout::Elapsed> + From<Error>,
+        F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output = Result<T, EE>> + Send + '_>>,
+        EE: From<M::Error>,
+        E: From<EE> + From<tokio_timer::timeout::Elapsed> + From<M::Error>,
         T: Send + 'static,
     {
         let mut conn = Timeout::new(
@@ -353,7 +337,7 @@ where
         // only check if the connection is broken when we get an error from result
         let mut broken = false;
         if result.is_err() {
-            broken = shared.manager.is_closed(&mut conn.conn.0);
+            broken = shared.manager.is_closed(&mut conn.conn);
         }
 
         if broken {
@@ -367,11 +351,9 @@ where
     #[cfg(feature = "actix-web")]
     pub async fn run<T, E, EE, F>(&self, f: F) -> Result<T, E>
     where
-        F: FnOnce(
-            &mut (Client, Vec<Statement>),
-        ) -> Pin<Box<dyn Future<Output = Result<T, EE>> + Send + '_>>,
-        EE: From<Error>,
-        E: From<EE> + From<Error> + From<tokio_timer01::timeout::Error<Error>>,
+        F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output = Result<T, EE>> + Send + '_>>,
+        EE: From<M::Error>,
+        E: From<EE> + From<M::Error> + From<tokio_timer01::timeout::Error<M::Error>>,
         T: Send + 'static,
     {
         let mut conn = Timeout::new(
@@ -386,7 +368,7 @@ where
         // only check if the connection is broken when we get an error from result
         let mut broken = false;
         if result.is_err() {
-            broken = self.0.manager.is_closed(&mut conn.conn.0);
+            broken = self.0.manager.is_closed(&mut conn.conn);
         }
 
         if broken {
@@ -400,7 +382,7 @@ where
     /// recursive when failed to get a connection or the connection is broken. This method wrapped in a timeout future for canceling.
     fn get_idle_connection<'a>(
         &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Conn, Error>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Conn<M>, M::Error>> + Send + 'a>> {
         Box::pin(async move {
             let mut conn = match self.0.pool.pop() {
                 Ok(conn) => conn.into(),
@@ -409,7 +391,6 @@ where
                         + SPAWNED_COUNTER.load(Ordering::SeqCst))
                         < self.0.statics.max_size as usize
                     {
-                        // ToDo: spawn a future to add connection
                         let _r = self.0.add_connection().await;
                     }
 
@@ -432,7 +413,7 @@ where
 
             if self.0.statics.always_check {
                 // drop the connection if the connection is not valid anymore
-                if self.0.manager.is_valid(&mut conn.conn.0).await.is_err() {
+                if self.0.manager.is_valid(&mut conn.conn).await.is_err() {
                     let _ = self.0.drop_connections(vec![conn]).await;
                     return self.get_idle_connection().await;
                 }
@@ -463,36 +444,18 @@ impl fmt::Debug for State {
     }
 }
 
-pub struct PoolRef<Tls>
-where
-    Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
-    <Tls as MakeTlsConnect<Socket>>::Stream: Send,
-    <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
-    <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
-{
-    conn: Option<Conn>,
-    pool: Weak<SharedPool<Tls>>,
+pub struct PoolRef<M: Manager> {
+    conn: Option<Conn<M>>,
+    pool: Weak<SharedPool<M>>,
 }
 
-impl<Tls> PoolRef<Tls>
-where
-    Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
-    <Tls as MakeTlsConnect<Socket>>::Stream: Send,
-    <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
-    <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
-{
-    pub fn get_conn(&mut self) -> &mut (Client, Vec<Statement>) {
+impl<M: Manager> PoolRef<M> {
+    pub fn get_conn(&mut self) -> &mut M::Connection {
         &mut self.conn.as_mut().unwrap().conn
     }
 }
 
-impl<Tls> Drop for PoolRef<Tls>
-where
-    Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
-    <Tls as MakeTlsConnect<Socket>>::Stream: Send,
-    <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
-    <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
-{
+impl<M: Manager> Drop for PoolRef<M> {
     fn drop(&mut self) {
         if let Some(shared_pool) = self.pool.upgrade() {
             let mut conn = self.conn.take().unwrap();
@@ -500,7 +463,7 @@ where
             #[cfg(feature = "actix-web")]
             actix_rt::spawn(
                 async move {
-                    let broken = shared_pool.manager.is_closed(&mut conn.conn.0);
+                    let broken = shared_pool.manager.is_closed(&mut conn.conn);
                     if broken {
                         let _r = shared_pool.drop_connections(vec![conn]).await;
                     } else {
@@ -514,25 +477,21 @@ where
 
             #[cfg(feature = "default")]
             tokio_executor::spawn(async move {
-                let broken = shared_pool.manager.is_closed(&mut conn.conn.0);
+                let broken = shared_pool.manager.is_closed(&mut conn.conn);
                 if broken {
                     let _r = shared_pool.drop_connections(vec![conn]).await;
                 } else {
                     shared_pool.put_back_conn(conn);
                 }
             });
+        } else {
+            SPAWNED_COUNTER.fetch_sub(1, Ordering::SeqCst);
         }
     }
 }
 
 /// schedule reaping runs in a spawned future.
-fn schedule_one_reaping<Tls>(shared: &Arc<SharedPool<Tls>>)
-where
-    Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
-    <Tls as MakeTlsConnect<Socket>>::Stream: Send,
-    <Tls as MakeTlsConnect<Socket>>::TlsConnect: Send,
-    <<Tls as MakeTlsConnect<Socket>>::TlsConnect as TlsConnect<Socket>>::Future: Send,
-{
+fn schedule_one_reaping<M: Manager>(shared: &Arc<SharedPool<M>>) {
     if shared.statics.max_lifetime.is_some() || shared.statics.idle_timeout.is_some() {
         let mut interval = Interval::new_interval(shared.statics.reaper_rate);
         let weak_shared = Arc::downgrade(&shared);
