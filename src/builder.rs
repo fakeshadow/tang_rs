@@ -106,7 +106,7 @@ impl Builder {
             "min_idle must be no larger than max_size"
         );
 
-        let pool = Pool::new_inner(self, manager);
+        let pool = Pool::new(self, manager);
         pool.0.replenish_idle_connections().await?;
 
         Ok(pool)

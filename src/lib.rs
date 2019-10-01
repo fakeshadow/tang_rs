@@ -90,6 +90,8 @@ use crossbeam_queue::{ArrayQueue, SegQueue};
 use futures::channel::oneshot::{channel, Sender};
 #[cfg(feature = "actix-web")]
 use futures::{compat::Future01CompatExt, FutureExt, TryFutureExt};
+#[cfg(feature = "default")]
+use tokio_executor::Executor;
 use tokio_timer::Interval;
 #[cfg(feature = "default")]
 use tokio_timer::Timeout;
@@ -149,8 +151,6 @@ impl<M: Manager> From<IdleConn<M>> for Conn<M> {
     }
 }
 
-/// use future aware mutex for inner Pool lock.
-/// So the waiter queue is handled by the mutex lock and not the pool.
 struct SharedPool<M: Manager> {
     statics: Builder,
     manager: M,
@@ -242,7 +242,7 @@ impl<M: Manager> SharedPool<M> {
         let desired = self.statics.min_idle;
 
         for _i in idle..max(idle + 1, min(desired, slots_available)) {
-            let _ = self.add_connection().await;
+            self.add_connection().await?;
         }
 
         Ok(())
@@ -286,7 +286,7 @@ impl<M: Manager> fmt::Debug for Pool<M> {
 }
 
 impl<M: Manager> Pool<M> {
-    fn new_inner(builder: Builder, manager: M) -> Self {
+    fn new(builder: Builder, manager: M) -> Self {
         let size = builder.max_size as usize;
 
         let shared_pool = Arc::new(SharedPool {
@@ -415,7 +415,8 @@ impl<M: Manager> Pool<M> {
                     if (self.0.load_pending() + self.0.load_spawn())
                         < self.0.statics.max_size as usize
                     {
-                        let _r = self.0.add_connection().await;
+                        // we return with an error if for any reason we get an error when spawning new connection
+                        self.0.add_connection().await?;
                     }
 
                     let (tx, rx) = channel();
@@ -430,7 +431,11 @@ impl<M: Manager> Pool<M> {
 
             // Spin up a new connection if necessary to retain our minimum idle count
             if (self.0.load_pending() + self.0.load_spawn()) < self.0.statics.min_idle as usize {
-                let _r = self.0.replenish_idle_connections().await;
+                // We put back conn and return error if we failed to spawn new connections.
+                if let Err(e) = self.0.replenish_idle_connections().await {
+                    self.0.put_back_conn(conn);
+                    return Err(e);
+                }
             }
 
             if self.0.statics.always_check {
@@ -481,6 +486,8 @@ impl<'a, M: Manager> Drop for PoolRef<'a, M> {
     fn drop(&mut self) {
         let mut conn = self.conn.take().unwrap();
         let shared_pool = self.pool.clone();
+
+        // ToDo: actix_rt doesn't have returned error when spawn future.
         #[cfg(feature = "actix-web")]
         actix_rt::spawn(
             async move {
@@ -497,14 +504,18 @@ impl<'a, M: Manager> Drop for PoolRef<'a, M> {
         );
 
         #[cfg(feature = "default")]
-        tokio_executor::spawn(async move {
-            let broken = shared_pool.manager.is_closed(&mut conn.conn);
-            if broken {
-                let _r = shared_pool.drop_connections(vec![conn]).await;
-            } else {
-                shared_pool.put_back_conn(conn);
-            }
-        });
+        let _ = tokio_executor::DefaultExecutor::current()
+            .spawn(Box::pin(async move {
+                let broken = shared_pool.manager.is_closed(&mut conn.conn);
+                if broken {
+                    let _r = shared_pool.drop_connections(vec![conn]).await;
+                } else {
+                    shared_pool.put_back_conn(conn);
+                }
+            }))
+            .map_err(|_| {
+                self.pool.decr_spawn(1);
+            });
     }
 }
 

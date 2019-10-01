@@ -6,7 +6,7 @@ edition = "2018"
 description = "A tokio-postgres Connection pool"
 keywords = ["database", "async", "tokio-postgres"]
 license = "MIT"
-exclude = ["example/*"]
+exclude = ["examples/*"]
 repository = "https://github.com/fakeshadow/tang_rs"
 readme= "README.md"
 
@@ -53,6 +53,7 @@ optional = true
 
 [dependencies.tokio-postgres]
 optional = true
+rev = "de20f0f"
 git = "https://github.com/sfackler/rust-postgres"
 
 [dependencies.redis]

@@ -3,7 +3,11 @@ use std::pin::Pin;
 use std::{borrow::Cow, fmt, str::FromStr};
 
 use futures::{future::Either, FutureExt, TryFutureExt, TryStreamExt};
-use tokio_postgres::{tls::MakeTlsConnect, types::Type, Client, Config, Error, Socket, Statement};
+use tokio_postgres::{
+    tls::{MakeTlsConnect, TlsConnect},
+    types::Type,
+    Client, Config, Error, Socket, Statement,
+};
 
 use crate::manager::Manager;
 
@@ -66,10 +70,11 @@ where
 
 impl<Tls> Manager for PostgresManager<Tls>
 where
+    //    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
     Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
     Tls::Stream: Send,
-    //    Tls::TlsConnect: Send,
-    //    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
+    Tls::TlsConnect: Send,
+    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
 {
     type Connection = (Client, Vec<Statement>);
     type Error = Error;
@@ -78,9 +83,7 @@ where
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Connection, Self::Error>> + Send + 'a>> {
         Box::pin(async move {
-            // ToDo: figure a way to pass self.tls to connect method.
             let (mut c, conn) = self.config.connect(tokio_postgres::NoTls).await?;
-
             tokio_executor::spawn(conn.map(|_| ()));
 
             let prepares = &self.prepares;

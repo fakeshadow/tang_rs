@@ -15,6 +15,7 @@ default-features = false
 features = [ "io", "codec", "fs" ]
 
 [dependencies.tokio-postgres]
+rev = "de20f0f"
 git = "https://github.com/sfackler/rust-postgres"
 
 [dependencies.redis]
