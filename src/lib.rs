@@ -78,7 +78,7 @@
 //!}
 //!```
 
-use std::cmp::{max, min};
+use std::cmp::min;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -113,7 +113,7 @@ mod postgres_tang;
 mod redis_tang;
 
 pub struct Conn<M: Manager> {
-    pub conn: M::Connection,
+    conn: M::Connection,
     birth: Instant,
 }
 
@@ -157,12 +157,11 @@ struct SharedPool<M: Manager> {
     pool: ArrayQueue<IdleConn<M>>,
     queue: SegQueue<Sender<Conn<M>>>,
     spawned: AtomicUsize,
-    pending: AtomicUsize,
 }
 
 impl<M: Manager> SharedPool<M> {
-    fn decr_spawn(&self, count: usize) {
-        self.spawned.fetch_sub(count, Ordering::SeqCst);
+    fn decr_spawn(&self, count: usize) -> usize {
+        self.spawned.fetch_sub(count, Ordering::SeqCst)
     }
 
     fn incr_spawn(&self, count: usize) {
@@ -173,25 +172,11 @@ impl<M: Manager> SharedPool<M> {
         self.spawned.load(Ordering::SeqCst)
     }
 
-    fn decr_pending(&self, count: usize) {
-        self.pending.fetch_sub(count, Ordering::SeqCst);
-    }
-
-    fn incr_pending(&self, count: usize) {
-        self.pending.fetch_add(count, Ordering::SeqCst);
-    }
-
-    fn load_pending(&self) -> usize {
-        self.pending.load(Ordering::SeqCst)
-    }
-
     fn put_back_conn(&self, conn: Conn<M>) {
         let mut conn = conn;
         while let Ok(tx) = self.queue.pop() {
             match tx.send(conn) {
-                Ok(()) => {
-                    return;
-                }
+                Ok(()) => return,
                 Err(c) => conn = c,
             }
         }
@@ -202,13 +187,11 @@ impl<M: Manager> SharedPool<M> {
     }
 
     // ToDo: spawn this method in thread pool
-    async fn drop_connections(&self, to_drop: Vec<Conn<M>>) -> Result<(), M::Error> {
-        self.decr_spawn(to_drop.len());
+    async fn drop_connection(&self, _conn: Conn<M>) -> Result<(), M::Error> {
         // We might need to spin up more connections to maintain the idle limit, e.g.
         // if we hit connection lifetime limits
-        let min = self.statics.min_idle as usize;
-        if self.load_spawn() < min {
-            self.replenish_idle_connections().await
+        if self.decr_spawn(1) <= self.statics.min_idle {
+            self.add_connection().await
         } else {
             Ok(())
         }
@@ -216,14 +199,11 @@ impl<M: Manager> SharedPool<M> {
 
     // ToDo: spawn this method in thread pool
     async fn add_connection(&self) -> Result<(), M::Error> {
-        self.incr_pending(1);
+        self.incr_spawn(1);
         let conn = self.manager.connect().await.map_err(|e| {
-            self.decr_pending(1);
+            self.decr_spawn(1);
             e
         })?;
-
-        self.decr_pending(1);
-        self.incr_spawn(1);
 
         let conn = IdleConn::new(conn);
 
@@ -233,18 +213,9 @@ impl<M: Manager> SharedPool<M> {
     }
 
     async fn replenish_idle_connections(&self) -> Result<(), M::Error> {
-        let pending = self.load_pending() as u8;
-        let spawned = self.load_spawn() as u8;
-
-        let slots_available = self.statics.max_size - spawned - pending;
-
-        let idle = self.pool.len() as u8;
-        let desired = self.statics.min_idle;
-
-        for _i in idle..max(idle + 1, min(desired, slots_available)) {
+        while self.load_spawn() < min(self.statics.min_idle, self.statics.max_size) {
             self.add_connection().await?;
         }
-
         Ok(())
     }
 
@@ -261,7 +232,7 @@ impl<M: Manager> SharedPool<M> {
             }
 
             if should_drop {
-                let _ = self.drop_connections(vec![conn.into()]).await;
+                let _ = self.drop_connection(conn.into()).await;
             } else {
                 self.put_back_conn(conn.into());
             }
@@ -295,7 +266,6 @@ impl<M: Manager> Pool<M> {
             pool: ArrayQueue::new(size),
             queue: SegQueue::new(),
             spawned: AtomicUsize::new(0),
-            pending: AtomicUsize::new(0),
         });
 
         // spawn a loop interval future to handle the lifetime and time out of connections.
@@ -366,7 +336,7 @@ impl<M: Manager> Pool<M> {
         }
 
         if broken {
-            let _r = self.0.drop_connections(vec![conn]).await;
+            let _r = self.0.drop_connection(conn).await;
         } else {
             self.0.put_back_conn(conn);
         }
@@ -397,7 +367,7 @@ impl<M: Manager> Pool<M> {
         }
 
         if broken {
-            let _r = self.0.drop_connections(vec![conn]).await;
+            let _r = self.0.drop_connection(conn).await;
         } else {
             self.0.put_back_conn(conn);
         }
@@ -412,9 +382,7 @@ impl<M: Manager> Pool<M> {
             let mut conn = match self.0.pool.pop() {
                 Ok(conn) => conn.into(),
                 Err(_) => {
-                    if (self.0.load_pending() + self.0.load_spawn())
-                        < self.0.statics.max_size as usize
-                    {
+                    if self.0.load_spawn() < self.0.statics.max_size {
                         // we return with an error if for any reason we get an error when spawning new connection
                         self.0.add_connection().await?;
                     }
@@ -430,7 +398,7 @@ impl<M: Manager> Pool<M> {
             };
 
             // Spin up a new connection if necessary to retain our minimum idle count
-            if (self.0.load_pending() + self.0.load_spawn()) < self.0.statics.min_idle as usize {
+            if self.0.load_spawn() < self.0.statics.min_idle {
                 // We put back conn and return error if we failed to spawn new connections.
                 if let Err(e) = self.0.replenish_idle_connections().await {
                     self.0.put_back_conn(conn);
@@ -441,7 +409,7 @@ impl<M: Manager> Pool<M> {
             if self.0.statics.always_check {
                 // drop the connection if the connection is not valid anymore
                 if self.0.manager.is_valid(&mut conn.conn).await.is_err() {
-                    let _ = self.0.drop_connections(vec![conn]).await;
+                    let _ = self.0.drop_connection(conn).await;
                     return self.get_idle_connection().await;
                 }
             }
@@ -484,7 +452,14 @@ impl<'a, M: Manager> PoolRef<'a, M> {
 
 impl<'a, M: Manager> Drop for PoolRef<'a, M> {
     fn drop(&mut self) {
-        let mut conn = self.conn.take().unwrap();
+        let mut conn = match self.conn.take() {
+            Some(conn) => conn,
+            None => {
+                self.pool.decr_spawn(1);
+                return;
+            }
+        };
+
         let shared_pool = self.pool.clone();
 
         // ToDo: actix_rt doesn't have returned error when spawn future.
@@ -493,7 +468,7 @@ impl<'a, M: Manager> Drop for PoolRef<'a, M> {
             async move {
                 let broken = shared_pool.manager.is_closed(&mut conn.conn);
                 if broken {
-                    let _r = shared_pool.drop_connections(vec![conn]).await;
+                    let _r = shared_pool.drop_connection(conn).await;
                 } else {
                     shared_pool.put_back_conn(conn);
                 };
@@ -508,7 +483,7 @@ impl<'a, M: Manager> Drop for PoolRef<'a, M> {
             .spawn(Box::pin(async move {
                 let broken = shared_pool.manager.is_closed(&mut conn.conn);
                 if broken {
-                    let _r = shared_pool.drop_connections(vec![conn]).await;
+                    let _r = shared_pool.drop_connection(conn).await;
                 } else {
                     shared_pool.put_back_conn(conn);
                 }

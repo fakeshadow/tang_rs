@@ -4,8 +4,8 @@ use crate::manager::Manager;
 use crate::Pool;
 
 pub struct Builder {
-    pub(crate) max_size: u8,
-    pub(crate) min_idle: u8,
+    pub(crate) max_size: usize,
+    pub(crate) min_idle: usize,
     /// Whether or not to test the connection on checkout.
     pub(crate) always_check: bool,
     pub(crate) max_lifetime: Option<Duration>,
@@ -35,14 +35,12 @@ impl Builder {
     }
 
     pub fn max_size(mut self, max_size: u8) -> Builder {
-        if max_size > 0 {
-            self.max_size = max_size;
-        }
+        self.max_size = max_size as usize;
         self
     }
 
     pub fn min_idle(mut self, min_idle: u8) -> Builder {
-        self.min_idle = min_idle;
+        self.min_idle = min_idle as usize;
         self
     }
 
@@ -85,7 +83,7 @@ impl Builder {
     ///
     /// Default 15 seconds and only one connection will be checked in each interval.
     pub fn reaper_rate(mut self, reaper_rate: Duration) -> Builder {
-        self.reaper_rate = reaper_rate.into();
+        self.reaper_rate = reaper_rate;
         self
     }
 

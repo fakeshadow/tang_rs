@@ -5,16 +5,23 @@ extern crate rocket;
 #[macro_use]
 extern crate serde_derive;
 
+use std::convert::From;
+
 use futures::TryStreamExt;
 use rocket::{
     config::{Config, Environment},
     response::{content, Debug},
     State,
 };
-use std::convert::From;
-use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
 use tokio::runtime::Runtime;
 use tokio_postgres::{types::Type, Row};
+
+use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
+
+// dummy data
+const IDS: &[u32] = &[
+    1, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
+];
 
 // don't use tokio macro and async main as this will result in nested runtime.
 fn main() {
@@ -41,8 +48,9 @@ fn main() {
         .block_on(
             Builder::new()
                 .always_check(false)
-                .idle_timeout(Some(std::time::Duration::from_secs(20)))
-                .max_lifetime(Some(std::time::Duration::from_secs(20)))
+                .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
+                .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+                .reaper_rate(std::time::Duration::from_secs(15))
                 .min_idle(1)
                 .max_size(24)
                 .build(mgr),
@@ -56,8 +64,9 @@ fn main() {
         .block_on(
             Builder::new()
                 .always_check(false)
-                .idle_timeout(Some(std::time::Duration::from_secs(20)))
-                .max_lifetime(Some(std::time::Duration::from_secs(20)))
+                .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
+                .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+                .reaper_rate(std::time::Duration::from_secs(15))
                 .min_idle(1)
                 .max_size(24)
                 .build(mgr),
@@ -73,9 +82,9 @@ fn main() {
 
     // build server
     let server = rocket::custom(cfg)
-        .mount("/test", routes![index, index2])
+        .mount("/test", routes![index])
         .manage(pool)
-        .manage(pool_redis)
+        //        .manage(pool_redis)
         .spawn_on(&runtime);
 
     runtime.block_on(async move {
@@ -89,42 +98,39 @@ async fn index(
 ) -> Result<content::Json<String>, Debug<std::io::Error>> {
     // run pool in closure
     let _t: Result<_, MyError> = pool
-            .run(|mut conn|
-                // pin the async function to make sure the &mut Conn outlives our closure.
-                Box::pin(
-                    async move {
-                        let (client, statements) = &mut conn;
-                        let ids = vec![
-                            1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
-                        ];
+        .run(|mut conn|
+            // pin the async function to make sure the &mut Conn outlives our closure.
+            Box::pin(
+                async move {
+                    let (client, statements) = &mut conn;
 
-                        // statement index is the same as the input vector when building the pool.
-                        let statement = statements.get(0).unwrap();
+                    // statement index is the same as the input vector when building the pool.
+                    let statement = statements.get(0).unwrap();
 
-                        let (t, u): (Vec<Topic>, Vec<u32>) = client
-                            .query(statement, &[&ids])
-                            .try_fold(
-                                (Vec::with_capacity(20), Vec::with_capacity(20)),
-                                |(mut t, mut u), r| {
-                                    u.push(r.get(1));
-                                    t.push(r.into());
-                                    futures::future::ok((t, u))
-                                },
-                            )
-                            .await?;
+                    let (t, u): (Vec<Topic>, Vec<u32>) = client
+                        .query(statement, &[&IDS])
+                        .try_fold(
+                            (Vec::with_capacity(20), Vec::with_capacity(20)),
+                            |(mut t, mut u), r| {
+                                u.push(r.get(1));
+                                t.push(r.into());
+                                futures::future::ok((t, u))
+                            },
+                        )
+                        .await?;
 
-                        let _u = client
-                            .query(statements.get(1).unwrap(), &[&u])
-                            .try_collect::<Vec<Row>>()
-                            .await?;
+                    let _u = client
+                        .query(statements.get(1).unwrap(), &[&u])
+                        .try_collect::<Vec<Row>>()
+                        .await?;
 
-                        // return custom Error as long as your error type impl From<tokio_postgres::Error> and From<tokio_timer::timeout::Elapsed>
-                        Ok::<_, MyError>(t)
-                        // or you could use default PollError here
-                        // Ok::<_, PoolError>(t)
-                    }
-                ))
-            .await;
+                    // return custom Error as long as your error type impl From<tokio_postgres::Error> and From<tokio_timer::timeout::Elapsed>
+                    Ok::<_, MyError>(t)
+                    // or you could use default PollError here
+                    // Ok::<_, PoolError>(t)
+                }
+            ))
+        .await;
 
     // pool.get return the Conn and a weak reference of pool so that we can use the connection outside a closure.
 
@@ -132,12 +138,8 @@ async fn index(
 
     let (client, statements) = pool_ref.get_conn();
 
-    let ids = vec![
-        1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
-    ];
-
     let (t, u): (Vec<Topic>, Vec<u32>) = client
-        .query(statements.get(0).unwrap(), &[&ids])
+        .query(statements.get(0).unwrap(), &[&IDS])
         .try_fold(
             (Vec::with_capacity(20), Vec::with_capacity(20)),
             |(mut t, mut u), r| {
@@ -160,25 +162,25 @@ async fn index(
     Ok(content::Json(serde_json::to_string(&t).unwrap()))
 }
 
-#[get("/redis")]
-async fn index2(pool: State<'_, Pool<RedisManager>>) -> Result<String, Debug<std::io::Error>> {
-    // you can also run code in closure like postgres pool. we skip that here.
-
-    // Your Error type have to impl From<redis::RedisError> or you can use default error type tang_rs::RedisPoolError
-    let mut pool_ref = pool.get::<MyError>().await?;
-
-    let client = pool_ref.get_conn();
-
-    // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
-    // the client var we shadowed is from redis query return and last till the function end.
-    let (client, ()) = redis::cmd("PING")
-        .query_async(client.clone())
-        .await
-        .map_err(MyError::from)?;
-    drop(pool_ref);
-
-    Ok("done".into())
-}
+//#[get("/redis")]
+//async fn index2(pool: State<'_, Pool<RedisManager>>) -> Result<String, Debug<std::io::Error>> {
+//    // you can also run code in closure like postgres pool. we skip that here.
+//
+//    // Your Error type have to impl From<redis::RedisError> or you can use default error type tang_rs::RedisPoolError
+//    let mut pool_ref = pool.get::<MyError>().await?;
+//
+//    let client = pool_ref.get_conn();
+//
+//    // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
+//    // the client var we shadowed is from redis query return and last till the function end.
+//    let (client, ()) = redis::cmd("PING")
+//        .query_async(client.clone())
+//        .await
+//        .map_err(MyError::from)?;
+//    drop(pool_ref);
+//
+//    Ok("done".into())
+//}
 
 struct MyError;
 

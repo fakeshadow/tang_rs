@@ -20,20 +20,19 @@ default-features = false
 version = "1.0.101"
 
 [dependencies.tokio]
-version = "0.2.0-alpha.5"
+version = "=0.2.0-alpha.6"
 default-features = false
 features = [ "io", "codec", "fs" ]
 
 [dependencies.futures-preview]
-version = "0.3.0-alpha.18"
-features = [ "nightly", "compat", "async-await" ]
+version = "=0.3.0-alpha.19"
+features = [ "compat", "async-await" ]
 
 [dependencies.tokio-postgres]
-rev = "de20f0f"
 git = "https://github.com/sfackler/rust-postgres"
 
 [dependencies.redis]
-git = "https://github.com/Marwes/redis-rs.git"
+git = "https://github.com/fakeshadow/redis-rs"
 branch = "std_future"
 
 [dependencies.tang-rs]

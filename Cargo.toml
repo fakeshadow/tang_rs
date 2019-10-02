@@ -35,15 +35,15 @@ optional = true
 version = "0.1.2"
 
 [dependencies.futures-preview]
-version = "=0.3.0-alpha.18"
-features = [ "nightly", "compat", "async-await" ]
+version = "=0.3.0-alpha.19"
+features = [ "compat", "async-await" ]
 
 [dependencies.tokio-executor]
-version = "=0.2.0-alpha.5"
+version = "=0.2.0-alpha.6"
 optional = true
 
 [dependencies.tokio-timer]
-version = "=0.3.0-alpha.5"
+version = "=0.3.0-alpha.6"
 optional = true
 
 [dependencies.tokio-timer01]
@@ -53,10 +53,9 @@ optional = true
 
 [dependencies.tokio-postgres]
 optional = true
-rev = "de20f0f"
 git = "https://github.com/sfackler/rust-postgres"
 
 [dependencies.redis]
 optional = true
-git = "https://github.com/Marwes/redis-rs.git"
+git = "https://github.com/fakeshadow/redis-rs"
 branch = "std_future"

@@ -24,7 +24,8 @@ async fn main() -> std::io::Result<()> {
     let pool = Builder::new()
         .always_check(false) // if set true every connection will be checked before checkout.
         .idle_timeout(None) // set to None to ignore idle connection drop.
-        .max_lifetime(None)
+        .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+        .reaper_rate(std::time::Duration::from_secs(15)) // interval of idle and lifetime check.
         .min_idle(1)
         .max_size(12)
         .build(mgr)
