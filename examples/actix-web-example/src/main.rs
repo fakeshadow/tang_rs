@@ -10,7 +10,7 @@ use actix_web::{
 use futures::{FutureExt, TryFutureExt, TryStreamExt};
 use tokio_postgres::{types::Type, NoTls, Row};
 
-use tang_rs::{Builder, Pool, PostgresManager, PostgresPoolError, RedisManager, RedisPoolError};
+use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -48,7 +48,7 @@ async fn main() -> std::io::Result<()> {
         .max_size(24)
         .build(mgr)
         .await
-        .unwrap_or_else(|_| panic!("can't make pool"));
+        .unwrap_or_else(|e| panic!("{:?}", e));
 
     let mgr = RedisManager::new("redis://127.0.0.1");
 
@@ -86,7 +86,7 @@ async fn test_async(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResp
     ];
 
     let mut pool_ref = pool
-        .get::<PostgresPoolError>()
+        .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 
@@ -125,7 +125,7 @@ async fn test_redisasync(pool: Data<Pool<RedisManager>>) -> Result<HttpResponse,
 
     // Your Error type have to impl From<redis::RedisError> or you can use default error type tang_rs::RedisPoolError
     let mut pool_ref = pool
-        .get::<RedisPoolError>()
+        .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 

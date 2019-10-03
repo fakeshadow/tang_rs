@@ -16,7 +16,7 @@ use rocket::{
 use tokio::runtime::Runtime;
 use tokio_postgres::{types::Type, Row};
 
-use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
+use tang_rs::{Builder, Pool, PostgresManager, PostgresPoolError, RedisManager, RedisPoolError};
 
 // dummy data
 const IDS: &[u32] = &[
@@ -82,9 +82,9 @@ fn main() {
 
     // build server
     let server = rocket::custom(cfg)
-        .mount("/test", routes![index])
+        .mount("/test", routes![index, index2])
         .manage(pool)
-        //        .manage(pool_redis)
+        .manage(pool_redis)
         .spawn_on(&runtime);
 
     runtime.block_on(async move {
@@ -96,45 +96,8 @@ fn main() {
 async fn index(
     pool: State<'_, Pool<PostgresManager<tokio_postgres::NoTls>>>,
 ) -> Result<content::Json<String>, Debug<std::io::Error>> {
-    // run pool in closure
-    let _t: Result<_, MyError> = pool
-        .run(|mut conn|
-            // pin the async function to make sure the &mut Conn outlives our closure.
-            Box::pin(
-                async move {
-                    let (client, statements) = &mut conn;
-
-                    // statement index is the same as the input vector when building the pool.
-                    let statement = statements.get(0).unwrap();
-
-                    let (t, u): (Vec<Topic>, Vec<u32>) = client
-                        .query(statement, &[&IDS])
-                        .try_fold(
-                            (Vec::with_capacity(20), Vec::with_capacity(20)),
-                            |(mut t, mut u), r| {
-                                u.push(r.get(1));
-                                t.push(r.into());
-                                futures::future::ok((t, u))
-                            },
-                        )
-                        .await?;
-
-                    let _u = client
-                        .query(statements.get(1).unwrap(), &[&u])
-                        .try_collect::<Vec<Row>>()
-                        .await?;
-
-                    // return custom Error as long as your error type impl From<tokio_postgres::Error> and From<tokio_timer::timeout::Elapsed>
-                    Ok::<_, MyError>(t)
-                    // or you could use default PollError here
-                    // Ok::<_, PoolError>(t)
-                }
-            ))
-        .await;
-
     // pool.get return the Conn and a weak reference of pool so that we can use the connection outside a closure.
-
-    let mut pool_ref = pool.get::<MyError>().await?;
+    let mut pool_ref = pool.get().await.map_err(MyError::from)?;
 
     let (client, statements) = pool_ref.get_conn();
 
@@ -149,55 +112,54 @@ async fn index(
             },
         )
         .await
-        .map_err(MyError::from)?;
+        .expect("Failed to query postgres");
 
     let _u = client
         .query(statements.get(1).unwrap(), &[&u])
         .try_collect::<Vec<Row>>()
         .await
-        .map_err(MyError::from)?;
+        .expect("Failed to query postgres");
 
     drop(pool_ref); // drop the pool_ref when you finish use the pool. so that the connection can be put back to pool asap.
 
     Ok(content::Json(serde_json::to_string(&t).unwrap()))
 }
 
-//#[get("/redis")]
-//async fn index2(pool: State<'_, Pool<RedisManager>>) -> Result<String, Debug<std::io::Error>> {
-//    // you can also run code in closure like postgres pool. we skip that here.
-//
-//    // Your Error type have to impl From<redis::RedisError> or you can use default error type tang_rs::RedisPoolError
-//    let mut pool_ref = pool.get::<MyError>().await?;
-//
-//    let client = pool_ref.get_conn();
-//
-//    // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
-//    // the client var we shadowed is from redis query return and last till the function end.
-//    let (client, ()) = redis::cmd("PING")
-//        .query_async(client.clone())
-//        .await
-//        .map_err(MyError::from)?;
-//    drop(pool_ref);
-//
-//    Ok("done".into())
-//}
+#[get("/redis")]
+async fn index2(pool: State<'_, Pool<RedisManager>>) -> Result<String, Debug<std::io::Error>> {
+    let mut pool_ref = pool.get().await.map_err(MyError::from)?;
+    let client = pool_ref.get_conn();
+
+    // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
+    // the client var we shadowed is from redis query return and last till the function end.
+    let (client, ()) = redis::cmd("PING")
+        .query_async(client.clone())
+        .await
+        .expect("Failed to query redis");
+
+    drop(pool_ref);
+
+    Ok("done".into())
+}
 
 struct MyError;
 
-impl From<tokio_postgres::Error> for MyError {
-    fn from(_e: tokio_postgres::Error) -> MyError {
+impl From<PostgresPoolError> for MyError {
+    fn from(e: PostgresPoolError) -> MyError {
+        match e {
+            PostgresPoolError::Inner(_e) => println!("inner is tokio_postgres::Error"),
+            PostgresPoolError::TimeOut => (),
+        };
         MyError
     }
 }
 
-impl From<redis::RedisError> for MyError {
-    fn from(_e: redis::RedisError) -> MyError {
-        MyError
-    }
-}
-
-impl From<tokio::timer::timeout::Elapsed> for MyError {
-    fn from(_e: tokio::timer::timeout::Elapsed) -> MyError {
+impl From<RedisPoolError> for MyError {
+    fn from(e: RedisPoolError) -> MyError {
+        match e {
+            RedisPoolError::Inner(_e) => println!("inner is redis::RedisError"),
+            RedisPoolError::TimeOut => (),
+        };
         MyError
     }
 }

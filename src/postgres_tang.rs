@@ -77,7 +77,7 @@ where
     <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
 {
     type Connection = (Client, Vec<Statement>);
-    type Error = Error;
+    type Error = PostgresPoolError;
 
     fn connect<'a>(
         &'a self,
@@ -126,6 +126,7 @@ where
             Box::pin(c.0.simple_query(""))
                 .try_next()
                 .map_ok(|_| ())
+                .err_into()
                 .await
         })
     }

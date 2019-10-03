@@ -23,12 +23,12 @@ impl RedisManager {
 
 impl Manager for RedisManager {
     type Connection = SharedConnection;
-    type Error = RedisError;
+    type Error = RedisPoolError;
 
     fn connect<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Self::Connection, Self::Error>> + Send + 'a>> {
-        Box::pin(self.client.get_shared_async_connection())
+        Box::pin(self.client.get_shared_async_connection().err_into())
     }
 
     fn is_valid<'a>(
@@ -38,6 +38,7 @@ impl Manager for RedisManager {
         Box::pin(
             redis::cmd("PING")
                 .query_async(c.clone())
+                .err_into()
                 .map_ok(|(_, ())| ()),
         )
     }

@@ -11,6 +11,7 @@ pub struct Builder {
     pub(crate) max_lifetime: Option<Duration>,
     pub(crate) idle_timeout: Option<Duration>,
     pub(crate) connection_timeout: Duration,
+    pub(crate) queue_timeout: Duration,
     /// The time interval used to wake up and reap connections.
     pub(crate) reaper_rate: Duration,
 }
@@ -24,6 +25,7 @@ impl Default for Builder {
             max_lifetime: Some(Duration::from_secs(30 * 60)),
             idle_timeout: Some(Duration::from_secs(10 * 60)),
             connection_timeout: Duration::from_secs(10),
+            queue_timeout: Duration::from_secs(20),
             reaper_rate: Duration::from_secs(15),
         }
     }
@@ -97,6 +99,16 @@ impl Builder {
         self
     }
 
+    /// Sets the wait timeout used by the queue.
+    ///
+    /// Similar to connection_timeout. A time out error will return.
+    ///
+    /// Default 20 seconds
+    pub fn wait_timeout(mut self, queue_timeout: Duration) -> Builder {
+        self.queue_timeout = queue_timeout;
+        self
+    }
+
     /// Consumes the builder, returning a new, initialized `Pool`.
     pub async fn build<M: Manager>(self, manager: M) -> Result<Pool<M>, M::Error> {
         assert!(
@@ -105,7 +117,10 @@ impl Builder {
         );
 
         let pool = Pool::new(self, manager);
+        #[cfg(feature = "default")]
         pool.0.replenish_idle_connections().await?;
+        #[cfg(feature = "actix-web")]
+        pool.0.replenish_idle_connections_temp().await?;
 
         Ok(pool)
     }

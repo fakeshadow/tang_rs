@@ -1,5 +1,5 @@
 use futures::TryStreamExt;
-use tang_rs::{Builder, PostgresManager, PostgresPoolError, RedisManager, RedisPoolError};
+use tang_rs::{Builder, PostgresManager, PostgresPoolError, RedisManager};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -35,6 +35,7 @@ async fn main() -> std::io::Result<()> {
     // wait a bit as the pool spawn connections asynchronously
     tokio::timer::delay(std::time::Instant::now() + std::time::Duration::from_secs(1)).await;
 
+    // run pool in closure. it's slightly faster than pool.get().
     let _row = pool
         .run(|mut conn| {
             Box::pin(
@@ -53,12 +54,12 @@ async fn main() -> std::io::Result<()> {
                         .await?;
 
                     Ok::<_, PostgresPoolError>(row)
+                    // infer type here so that u can use your custom error in the closure. you error type have to impl From<PostgresPoolError> or From<RedisPoolError>.
                 },
             )
         })
         .await
         .map_err(|e| {
-            // return error will be wrapped in Inner.
             match e {
                 PostgresPoolError::Inner(e) => println!("{:?}", e),
                 PostgresPoolError::TimeOut => (),
@@ -68,7 +69,7 @@ async fn main() -> std::io::Result<()> {
 
     // get pool reference and run it outside of a closure
     let mut pool_ref = pool
-        .get::<PostgresPoolError>()
+        .get()
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "place holder error"))?;
 
@@ -83,6 +84,11 @@ async fn main() -> std::io::Result<()> {
         .try_collect::<Vec<tokio_postgres::Row>>()
         .await
         .expect("Failed to get row");
+
+    // we can take the connection out of pool ref if you prefer.
+    let conn = pool_ref.take_conn();
+
+    assert_eq!(true, conn.is_some());
 
     // it's a good thing to drop the pool_ref right after you finished as the connection will be put back to pool when the poo_ref is dropped.
     drop(pool_ref);
@@ -100,11 +106,7 @@ async fn main() -> std::io::Result<()> {
         .await
         .unwrap_or_else(|_| panic!("can't make redis pool"));
 
-    // Your Error type have to impl From<redis::RedisError> or you can use default error type tang_rs::RedisPoolError
-    let mut pool_ref = pool_redis
-        .get::<RedisPoolError>()
-        .await
-        .expect("Failed to get redis pool");
+    let mut pool_ref = pool_redis.get().await.expect("Failed to get redis pool");
 
     let client = pool_ref.get_conn();
 

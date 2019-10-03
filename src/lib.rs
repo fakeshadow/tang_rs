@@ -164,8 +164,8 @@ impl<M: Manager> SharedPool<M> {
         self.spawned.fetch_sub(count, Ordering::SeqCst)
     }
 
-    fn incr_spawn(&self, count: usize) {
-        self.spawned.fetch_add(count, Ordering::SeqCst);
+    fn incr_spawn(&self, count: usize) -> usize {
+        self.spawned.fetch_add(count, Ordering::SeqCst)
     }
 
     fn load_spawn(&self) -> usize {
@@ -188,8 +188,8 @@ impl<M: Manager> SharedPool<M> {
 
     // ToDo: spawn this method in thread pool
     async fn drop_connection(&self, _conn: Conn<M>) -> Result<(), M::Error> {
-        // We might need to spin up more connections to maintain the idle limit, e.g.
-        // if we hit connection lifetime limits
+        //  We might need to spin up more connections to maintain the idle limit, e.g.
+        //  if we hit connection lifetime limits
         if self.decr_spawn(1) <= self.statics.min_idle {
             self.add_connection().await
         } else {
@@ -198,9 +198,35 @@ impl<M: Manager> SharedPool<M> {
     }
 
     // ToDo: spawn this method in thread pool
+    /// use `Builder`'s connection_timeout setting to cancel the `connect` method and return error.
     async fn add_connection(&self) -> Result<(), M::Error> {
         self.incr_spawn(1);
-        let conn = self.manager.connect().await.map_err(|e| {
+
+        #[cfg(feature = "default")]
+        let conn = self
+            .manager
+            .connect()
+            .timeout(self.statics.connection_timeout)
+            .await
+            .map(|r| {
+                r.map_err(|e| {
+                    self.decr_spawn(1);
+                    e
+                })
+            })
+            .map_err(|e| {
+                self.decr_spawn(1);
+                e
+            })??;
+
+        #[cfg(feature = "actix-web")]
+        let conn = Timeout::new(
+            self.manager.connect().boxed().compat(),
+            self.statics.connection_timeout,
+        )
+        .compat()
+        .await
+        .map_err(|e| {
             self.decr_spawn(1);
             e
         })?;
@@ -212,9 +238,33 @@ impl<M: Manager> SharedPool<M> {
         Ok(())
     }
 
+    // ToDo: if connection return super slow could result in an inaccurate spawn count.
     async fn replenish_idle_connections(&self) -> Result<(), M::Error> {
         while self.load_spawn() < min(self.statics.min_idle, self.statics.max_size) {
             self.add_connection().await?;
+        }
+        Ok(())
+    }
+
+    // only used to spawn connections when starting the pool
+    #[cfg(feature = "actix-web")]
+    async fn replenish_idle_connections_temp(&self) -> Result<(), M::Error> {
+        while self.load_spawn() < min(self.statics.min_idle, self.statics.max_size) {
+            self.incr_spawn(1);
+
+            let conn = self
+                .manager
+                .connect()
+                .await
+                .map_err(|e| {
+                    self.decr_spawn(1);
+                    e
+                })
+                .unwrap();
+
+            let conn = IdleConn::new(conn);
+
+            self.put_back_conn(conn.into());
         }
         Ok(())
     }
@@ -274,18 +324,9 @@ impl<M: Manager> Pool<M> {
         Pool(shared_pool)
     }
 
-    /// `pool.get()` return a reference of pool and a Conn. So that you can use the Conn outside a closure.
-    /// The limitation is we can't figure out if your get a error when use the Conn and make conditional broken check before push the Conn back to pool
-    #[cfg(feature = "default")]
-    pub async fn get<'a, E>(&'a self) -> Result<PoolRef<'a, M>, E>
-    where
-        E: From<M::Error> + From<tokio_timer::timeout::Elapsed>,
-    {
-        let conn = Timeout::new(
-            self.get_idle_connection(),
-            self.0.statics.connection_timeout,
-        )
-        .await??;
+    /// Return a reference of `Arc<SharedPool<Manager>>` and a `Manager::Connection`.So that you can use the connection outside a closure.
+    pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
+        let conn = self.get_idle_connection().await?;
 
         Ok(PoolRef {
             conn: Some(conn),
@@ -293,70 +334,16 @@ impl<M: Manager> Pool<M> {
         })
     }
 
-    #[cfg(feature = "actix-web")]
-    pub async fn get<'a, E>(&'a self) -> Result<PoolRef<'a, M>, E>
-    where
-        E: From<M::Error> + From<tokio_timer01::timeout::Error<M::Error>>,
-    {
-        let conn = Timeout::new(
-            self.get_idle_connection().boxed_local().compat(),
-            self.0.statics.connection_timeout,
-        )
-        .compat()
-        .await?;
-
-        Ok(PoolRef {
-            conn: Some(conn),
-            pool: &self.0,
-        })
-    }
-
-    #[cfg(feature = "default")]
+    /// Run the pool with a closure.
+    /// Usually slightly faster than `Pool.get()` as we only do conditional broken check according to the closure result.
     pub async fn run<T, E, EE, F>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output = Result<T, EE>> + Send + '_>>,
         EE: From<M::Error>,
-        E: From<EE> + From<tokio_timer::timeout::Elapsed> + From<M::Error>,
+        E: From<EE> + From<M::Error>,
         T: Send + 'static,
     {
-        let mut conn = Timeout::new(
-            self.get_idle_connection(),
-            self.0.statics.connection_timeout,
-        )
-        .await??;
-
-        let result = f(&mut conn.conn).await;
-
-        let shared = self.0.clone();
-
-        // only check if the connection is broken when we get an error from result
-        let mut broken = false;
-        if result.is_err() {
-            broken = shared.manager.is_closed(&mut conn.conn);
-        }
-
-        if broken {
-            let _r = self.0.drop_connection(conn).await;
-        } else {
-            self.0.put_back_conn(conn);
-        }
-        Ok(result?)
-    }
-
-    #[cfg(feature = "actix-web")]
-    pub async fn run<T, E, EE, F>(&self, f: F) -> Result<T, E>
-    where
-        F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output = Result<T, EE>> + Send + '_>>,
-        EE: From<M::Error>,
-        E: From<EE> + From<M::Error> + From<tokio_timer01::timeout::Error<M::Error>>,
-        T: Send + 'static,
-    {
-        let mut conn = Timeout::new(
-            self.get_idle_connection().boxed_local().compat(),
-            self.0.statics.connection_timeout,
-        )
-        .compat()
-        .await?;
+        let mut conn = self.get_idle_connection().await?;
 
         let result = f(&mut conn.conn).await;
 
@@ -374,7 +361,7 @@ impl<M: Manager> Pool<M> {
         Ok(result?)
     }
 
-    /// recursive when failed to get a connection or the connection is broken. This method wrapped in a timeout future for canceling.
+    /// recursive when the connection is broken or we get an error from oneshot channel.
     fn get_idle_connection<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Conn<M>, M::Error>> + Send + 'a>> {
@@ -390,7 +377,17 @@ impl<M: Manager> Pool<M> {
                     let (tx, rx) = channel();
                     self.0.queue.push(tx);
 
-                    match rx.await {
+                    // we return error if the timeout reached when waiting for the queue.
+                    #[cfg(feature = "default")]
+                    match rx.timeout(self.0.statics.queue_timeout).await? {
+                        Ok(conn) => conn,
+                        Err(_) => return self.get_idle_connection().await,
+                    }
+                    #[cfg(feature = "actix-web")]
+                    match Timeout::new(rx.boxed().compat(), self.0.statics.queue_timeout)
+                        .compat()
+                        .await
+                    {
                         Ok(conn) => conn,
                         Err(_) => return self.get_idle_connection().await,
                     }
@@ -439,14 +436,30 @@ impl fmt::Debug for State {
     }
 }
 
+// ToDo: possible to make PoolRef Send?
 pub struct PoolRef<'a, M: Manager> {
     conn: Option<Conn<M>>,
     pool: &'a Arc<SharedPool<M>>,
 }
 
 impl<'a, M: Manager> PoolRef<'a, M> {
+    /// get a mut reference of connection.
     pub fn get_conn(&mut self) -> &mut M::Connection {
         &mut self.conn.as_mut().unwrap().conn
+    }
+
+    /// take the the ownership of connection from pool and it won't be pushed back to pool anymore.
+    pub fn take_conn(&mut self) -> Option<M::Connection> {
+        self.conn.take().map(|c| c.conn)
+    }
+
+    /// manually push a connection to pool. We treat this connection as a new born one.
+    /// operation will fail if the pool is already in full capacity(no error will return)
+    pub fn push_conn(&mut self, conn: M::Connection) {
+        self.conn = Some(Conn {
+            conn,
+            birth: Instant::now(),
+        });
     }
 }
 
@@ -462,7 +475,7 @@ impl<'a, M: Manager> Drop for PoolRef<'a, M> {
 
         let shared_pool = self.pool.clone();
 
-        // ToDo: actix_rt doesn't have returned error when spawn future.
+        // ToDo: actix_rt doesn't have spawn error so we can't adjust spawned count accordingly.
         #[cfg(feature = "actix-web")]
         actix_rt::spawn(
             async move {
@@ -508,3 +521,12 @@ fn schedule_one_reaping<M: Manager>(shared: &Arc<SharedPool<M>>) {
         });
     }
 }
+
+/// a shortcut for tokio timeout
+trait CrateTimeOut: Sized {
+    fn timeout(self, dur: std::time::Duration) -> Timeout<Self> {
+        Timeout::new(self, dur)
+    }
+}
+
+impl<F: Future> CrateTimeOut for F {}
