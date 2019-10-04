@@ -6,13 +6,11 @@ use crate::Pool;
 pub struct Builder {
     pub(crate) max_size: usize,
     pub(crate) min_idle: usize,
-    /// Whether or not to test the connection on checkout.
     pub(crate) always_check: bool,
     pub(crate) max_lifetime: Option<Duration>,
     pub(crate) idle_timeout: Option<Duration>,
     pub(crate) connection_timeout: Duration,
     pub(crate) queue_timeout: Duration,
-    /// The time interval used to wake up and reap connections.
     pub(crate) reaper_rate: Duration,
 }
 

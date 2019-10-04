@@ -96,7 +96,7 @@ fn main() {
 async fn index(
     pool: State<'_, Pool<PostgresManager<tokio_postgres::NoTls>>>,
 ) -> Result<content::Json<String>, Debug<std::io::Error>> {
-    // pool.get return the Conn and a weak reference of pool so that we can use the connection outside a closure.
+    // pool.get return the Conn and a reference of pool so that we can use the connection outside a closure.
     let mut pool_ref = pool.get().await.map_err(MyError::from)?;
 
     let (client, statements) = pool_ref.get_conn();

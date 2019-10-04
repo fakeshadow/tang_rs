@@ -6,7 +6,11 @@ use std::pin::Pin;
 #[cfg(feature = "default")]
 pub trait Manager: Send + Sync + 'static {
     type Connection: Send + 'static;
-    type Error: Send + 'static + Debug + From<tokio_timer::timeout::Elapsed>;
+    type Error: Send
+        + 'static
+        + Debug
+        + From<tokio_timer::timeout::Elapsed>
+        + From<futures::channel::oneshot::Canceled>;
 
     fn connect<'a>(
         &'a self,

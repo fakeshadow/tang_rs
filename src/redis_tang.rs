@@ -77,6 +77,12 @@ impl From<RedisError> for RedisPoolError {
     }
 }
 
+impl From<futures::channel::oneshot::Canceled> for RedisPoolError {
+    fn from(_e: futures::channel::oneshot::Canceled) -> Self {
+        RedisPoolError::TimeOut
+    }
+}
+
 #[cfg(feature = "default")]
 impl From<tokio_timer::timeout::Elapsed> for RedisPoolError {
     fn from(_e: tokio_timer::timeout::Elapsed) -> RedisPoolError {

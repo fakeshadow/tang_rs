@@ -11,12 +11,14 @@
 //!
 //! # Example:
 //!``` rust
+//!use std::time::Duration;
+//!
 //!use futures::TryStreamExt;
-//!use tang_rs::{Builder, PoolError, PostgresManager};
+//!use tang_rs::{Builder, PostgresPoolError, PostgresManager};
 //!
 //!#[tokio::main]
 //!async fn main() -> std::io::Result<()> {
-//!    let db_url = "postgres://postgres:123@localhost/test";
+//! let db_url = "postgres://postgres:123@localhost/test";
 //!    // make prepared statements. pass Vec<tokio_postgres::types::Type> if you want typed statement. pass vec![] for no typed statement.
 //!    // pass vec![] if you don't need any prepared statements.
 //!    let statements = vec![
@@ -32,11 +34,12 @@
 //!            statements,
 //!            tokio_postgres::NoTls,
 //!        ).unwrap_or_else(|_| panic!("can't make postgres manager"));
+//!
 //!    // make pool
 //!    let pool = Builder::new()
 //!        .always_check(false) // if set true every connection will be checked before checkout.
 //!        .idle_timeout(None) // set idle_timeout and max_lifetime both to None to ignore idle connection drop.
-//!        .max_lifetime(None)
+//!        .max_lifetime(Some(Duration::from_secs(30 * 60)))
 //!        .min_idle(1)
 //!        .max_size(12)
 //!        .build(mgr)
@@ -44,7 +47,8 @@
 //!        .unwrap_or_else(|_| panic!("can't make pool"));
 //!    // wait a bit as the pool spawn connections asynchronously
 //!    tokio::timer::delay(std::time::Instant::now() + std::time::Duration::from_secs(1)).await;
-//!    // run the pool and use closure to query the database.
+//!
+//!    // run the pool and use closure to query the pool.
 //!    let _row = pool
 //!        .run(|mut conn| Box::pin(  // pin the async function to make sure the &mut Conn outlives our closure.
 //!            async move {
@@ -57,20 +61,18 @@
 //!                // but be ware when a new connection spawn the associated statements will be the ones you passed in builder.
 //!
 //!                let ids = vec![1u32, 2, 3, 4, 5];
-//!
 //!                let row = client.query(statement, &[&ids]).try_collect::<Vec<tokio_postgres::Row>>().await?;
 //!
 //!                // default error type.
-//!                // you can return your own error type as long as it impl From trait for tokio_postgres::Error and tokio_timer::timeout::Elapsed
-//!                Ok::<_, PoolError>(row)
+//!                // you can infer your own error type as long as it impl From trait for tang_rs::PostgresPoolError and tang_rs::RedisPoolError
+//!                Ok::<_, PostgresPoolError>(row)
 //!             }
 //!        ))
 //!        .await
 //!        .map_err(|e| {
-//!                // return error will be wrapped in Inner.
 //!            match e {
-//!                PoolError::Inner(e) => println!("{:?}", e),
-//!                PoolError::TimeOut => ()
+//!                PostgresPoolError::Inner(e) => println!("{:?}", e),
+//!                PostgresPoolError::TimeOut => ()
 //!                };
 //!            std::io::Error::new(std::io::ErrorKind::Other, "place holder error")
 //!        })?;
@@ -151,6 +153,8 @@ impl<M: Manager> From<IdleConn<M>> for Conn<M> {
     }
 }
 
+/// `crossbeam_queue` is used to manage the pool and waiting queue.
+/// `AtomicUsize` is used to track the total amount of `Conn + IdleConn`
 struct SharedPool<M: Manager> {
     statics: Builder,
     manager: M,
@@ -161,15 +165,15 @@ struct SharedPool<M: Manager> {
 
 impl<M: Manager> SharedPool<M> {
     fn decr_spawn(&self, count: usize) -> usize {
-        self.spawned.fetch_sub(count, Ordering::SeqCst)
+        self.spawned.fetch_sub(count, Ordering::Relaxed)
     }
 
     fn incr_spawn(&self, count: usize) -> usize {
-        self.spawned.fetch_add(count, Ordering::SeqCst)
+        self.spawned.fetch_add(count, Ordering::Relaxed)
     }
 
     fn load_spawn(&self) -> usize {
-        self.spawned.load(Ordering::SeqCst)
+        self.spawned.load(Ordering::Relaxed)
     }
 
     fn put_back_conn(&self, conn: Conn<M>) {
@@ -186,7 +190,6 @@ impl<M: Manager> SharedPool<M> {
         }
     }
 
-    // ToDo: spawn this method in thread pool
     async fn drop_connection(&self, _conn: Conn<M>) -> Result<(), M::Error> {
         //  We might need to spin up more connections to maintain the idle limit, e.g.
         //  if we hit connection lifetime limits
@@ -197,8 +200,7 @@ impl<M: Manager> SharedPool<M> {
         }
     }
 
-    // ToDo: spawn this method in thread pool
-    /// use `Builder`'s connection_timeout setting to cancel the `connect` method and return error.
+    // use `Builder`'s connection_timeout setting to cancel the `connect` method and return error.
     async fn add_connection(&self) -> Result<(), M::Error> {
         self.incr_spawn(1);
 
@@ -238,7 +240,6 @@ impl<M: Manager> SharedPool<M> {
         Ok(())
     }
 
-    // ToDo: if connection return super slow could result in an inaccurate spawn count.
     async fn replenish_idle_connections(&self) -> Result<(), M::Error> {
         while self.load_spawn() < min(self.statics.min_idle, self.statics.max_size) {
             self.add_connection().await?;
@@ -324,9 +325,10 @@ impl<M: Manager> Pool<M> {
         Pool(shared_pool)
     }
 
-    /// Return a reference of `Arc<SharedPool<Manager>>` and a `Manager::Connection`.So that you can use the connection outside a closure.
+    /// Return a reference of `Arc<SharedPool<Manager>>` and a `Option<Manager::Connection>`.
+    /// The `PoolRef` should be drop asap when you finish the use of it.
     pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
-        let conn = self.get_idle_connection().await?;
+        let conn = self.get_idle_connection(0).await?;
 
         Ok(PoolRef {
             conn: Some(conn),
@@ -343,7 +345,7 @@ impl<M: Manager> Pool<M> {
         E: From<EE> + From<M::Error>,
         T: Send + 'static,
     {
-        let mut conn = self.get_idle_connection().await?;
+        let mut conn = self.get_idle_connection(0).await?;
 
         let result = f(&mut conn.conn).await;
 
@@ -362,40 +364,53 @@ impl<M: Manager> Pool<M> {
     }
 
     /// recursive when the connection is broken or we get an error from oneshot channel.
+    /// we exit with at most 3 retries.
     fn get_idle_connection<'a>(
         &'a self,
+        mut retry: u8,
     ) -> Pin<Box<dyn Future<Output = Result<Conn<M>, M::Error>> + Send + 'a>> {
         Box::pin(async move {
-            let mut conn = match self.0.pool.pop() {
+            let pool = &self.0;
+            let mut conn = match pool.pool.pop() {
                 Ok(conn) => conn.into(),
                 Err(_) => {
-                    if self.0.load_spawn() < self.0.statics.max_size {
+                    if pool.load_spawn() < pool.statics.max_size {
                         // we return with an error if for any reason we get an error when spawning new connection
-                        self.0.add_connection().await?;
+                        pool.add_connection().await?;
                     }
 
                     let (tx, rx) = channel();
-                    self.0.queue.push(tx);
+                    pool.queue.push(tx);
 
                     // we return error if the timeout reached when waiting for the queue.
                     #[cfg(feature = "default")]
-                    match rx.timeout(self.0.statics.queue_timeout).await? {
+                    match rx.timeout(pool.statics.queue_timeout).await? {
                         Ok(conn) => conn,
-                        Err(_) => return self.get_idle_connection().await,
+                        Err(e) => {
+                            if retry > 3 {
+                                return Err(e.into());
+                            } else {
+                                retry += 1;
+                                return self.get_idle_connection(retry).await;
+                            }
+                        }
                     }
                     #[cfg(feature = "actix-web")]
-                    match Timeout::new(rx.boxed().compat(), self.0.statics.queue_timeout)
+                    match Timeout::new(rx.boxed().compat(), pool.statics.queue_timeout)
                         .compat()
                         .await
                     {
                         Ok(conn) => conn,
-                        Err(_) => return self.get_idle_connection().await,
+                        Err(_) => {
+                            retry += 1;
+                            return self.get_idle_connection(retry).await;
+                        }
                     }
                 }
             };
 
             // Spin up a new connection if necessary to retain our minimum idle count
-            if self.0.load_spawn() < self.0.statics.min_idle {
+            if pool.load_spawn() < pool.statics.min_idle {
                 // We put back conn and return error if we failed to spawn new connections.
                 if let Err(e) = self.0.replenish_idle_connections().await {
                     self.0.put_back_conn(conn);
@@ -403,18 +418,24 @@ impl<M: Manager> Pool<M> {
                 }
             }
 
-            if self.0.statics.always_check {
+            if pool.statics.always_check {
                 // drop the connection if the connection is not valid anymore
-                if self.0.manager.is_valid(&mut conn.conn).await.is_err() {
-                    let _ = self.0.drop_connection(conn).await;
-                    return self.get_idle_connection().await;
+                if let Err(e) = pool.manager.is_valid(&mut conn.conn).await {
+                    let _ = pool.drop_connection(conn).await;
+
+                    if retry > 3 {
+                        return Err(e);
+                    } else {
+                        retry += 1;
+                        return self.get_idle_connection(retry).await;
+                    }
                 }
             }
             Ok(conn)
         })
     }
 
-    pub async fn state(&self) -> State {
+    pub fn state(&self) -> State {
         State {
             connections: self.0.load_spawn() as u8,
             idle_connections: self.0.pool.len() as u8,
@@ -436,7 +457,6 @@ impl fmt::Debug for State {
     }
 }
 
-// ToDo: possible to make PoolRef Send?
 pub struct PoolRef<'a, M: Manager> {
     conn: Option<Conn<M>>,
     pool: &'a Arc<SharedPool<M>>,
@@ -507,7 +527,7 @@ impl<'a, M: Manager> Drop for PoolRef<'a, M> {
     }
 }
 
-/// schedule reaping runs in a spawned future.
+// schedule reaping runs in a spawned future.
 fn schedule_one_reaping<M: Manager>(shared: &Arc<SharedPool<M>>) {
     if shared.statics.max_lifetime.is_some() || shared.statics.idle_timeout.is_some() {
         let mut interval = Interval::new_interval(shared.statics.reaper_rate);
@@ -522,7 +542,7 @@ fn schedule_one_reaping<M: Manager>(shared: &Arc<SharedPool<M>>) {
     }
 }
 
-/// a shortcut for tokio timeout
+// a shortcut for tokio timeout
 trait CrateTimeOut: Sized {
     fn timeout(self, dur: std::time::Duration) -> Timeout<Self> {
         Timeout::new(self, dur)

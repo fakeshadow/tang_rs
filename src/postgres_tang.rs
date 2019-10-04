@@ -181,6 +181,12 @@ impl From<Error> for PostgresPoolError {
     }
 }
 
+impl From<futures::channel::oneshot::Canceled> for PostgresPoolError {
+    fn from(_e: futures::channel::oneshot::Canceled) -> Self {
+        PostgresPoolError::TimeOut
+    }
+}
+
 #[cfg(feature = "default")]
 impl From<tokio_timer::timeout::Elapsed> for PostgresPoolError {
     fn from(_e: tokio_timer::timeout::Elapsed) -> PostgresPoolError {
