@@ -4,8 +4,8 @@ use crate::manager::Manager;
 use crate::Pool;
 
 pub struct Builder {
-    pub(crate) max_size: usize,
-    pub(crate) min_idle: usize,
+    pub(crate) max_size: u8,
+    pub(crate) min_idle: u8,
     pub(crate) always_check: bool,
     pub(crate) max_lifetime: Option<Duration>,
     pub(crate) idle_timeout: Option<Duration>,
@@ -35,12 +35,12 @@ impl Builder {
     }
 
     pub fn max_size(mut self, max_size: u8) -> Builder {
-        self.max_size = max_size as usize;
+        self.max_size = max_size;
         self
     }
 
     pub fn min_idle(mut self, min_idle: u8) -> Builder {
-        self.min_idle = min_idle as usize;
+        self.min_idle = min_idle;
         self
     }
 

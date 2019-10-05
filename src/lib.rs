@@ -83,8 +83,9 @@
 use std::cmp::min;
 use std::fmt;
 use std::future::Future;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -106,6 +107,8 @@ pub use manager::Manager;
 pub use postgres_tang::{PostgresManager, PostgresPoolError};
 #[cfg(feature = "redis")]
 pub use redis_tang::{RedisManager, RedisPoolError};
+
+use crate::manager::ManagerFuture;
 
 mod builder;
 mod manager;
@@ -160,19 +163,19 @@ struct SharedPool<M: Manager> {
     manager: M,
     pool: ArrayQueue<IdleConn<M>>,
     queue: SegQueue<Sender<Conn<M>>>,
-    spawned: AtomicUsize,
+    spawned: AtomicU8,
 }
 
 impl<M: Manager> SharedPool<M> {
-    fn decr_spawn(&self, count: usize) -> usize {
+    fn decr_spawn(&self, count: u8) -> u8 {
         self.spawned.fetch_sub(count, Ordering::Relaxed)
     }
 
-    fn incr_spawn(&self, count: usize) -> usize {
+    fn incr_spawn(&self, count: u8) -> u8 {
         self.spawned.fetch_add(count, Ordering::Relaxed)
     }
 
-    fn load_spawn(&self) -> usize {
+    fn load_spawn(&self) -> u8 {
         self.spawned.load(Ordering::Relaxed)
     }
 
@@ -316,7 +319,7 @@ impl<M: Manager> Pool<M> {
             manager,
             pool: ArrayQueue::new(size),
             queue: SegQueue::new(),
-            spawned: AtomicUsize::new(0),
+            spawned: AtomicU8::new(0),
         });
 
         // spawn a loop interval future to handle the lifetime and time out of connections.
@@ -350,10 +353,11 @@ impl<M: Manager> Pool<M> {
         let result = f(&mut conn.conn).await;
 
         // only check if the connection is broken when we get an error from result
-        let mut broken = false;
-        if result.is_err() {
-            broken = self.0.manager.is_closed(&mut conn.conn);
-        }
+        let broken = if result.is_err() {
+            self.0.manager.is_closed(&mut conn.conn)
+        } else {
+            false
+        };
 
         if broken {
             let _r = self.0.drop_connection(conn).await;
@@ -365,10 +369,7 @@ impl<M: Manager> Pool<M> {
 
     /// recursive when the connection is broken or we get an error from oneshot channel.
     /// we exit with at most 3 retries.
-    fn get_idle_connection<'a>(
-        &'a self,
-        mut retry: u8,
-    ) -> Pin<Box<dyn Future<Output = Result<Conn<M>, M::Error>> + Send + 'a>> {
+    fn get_idle_connection(&self, mut retry: u8) -> ManagerFuture<Result<Conn<M>, M::Error>> {
         Box::pin(async move {
             let pool = &self.0;
             let mut conn = match pool.pool.pop() {
@@ -462,10 +463,24 @@ pub struct PoolRef<'a, M: Manager> {
     pool: &'a Arc<SharedPool<M>>,
 }
 
-impl<'a, M: Manager> PoolRef<'a, M> {
+impl<M: Manager> Deref for PoolRef<'_, M> {
+    type Target = M::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.conn.as_ref().unwrap().conn
+    }
+}
+
+impl<M: Manager> DerefMut for PoolRef<'_, M> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.conn.as_mut().unwrap().conn
+    }
+}
+
+impl<M: Manager> PoolRef<'_, M> {
     /// get a mut reference of connection.
     pub fn get_conn(&mut self) -> &mut M::Connection {
-        &mut self.conn.as_mut().unwrap().conn
+        &mut *self
     }
 
     /// take the the ownership of connection from pool and it won't be pushed back to pool anymore.
@@ -483,7 +498,7 @@ impl<'a, M: Manager> PoolRef<'a, M> {
     }
 }
 
-impl<'a, M: Manager> Drop for PoolRef<'a, M> {
+impl<M: Manager> Drop for PoolRef<'_, M> {
     fn drop(&mut self) {
         let mut conn = match self.conn.take() {
             Some(conn) => conn,
@@ -493,37 +508,32 @@ impl<'a, M: Manager> Drop for PoolRef<'a, M> {
             }
         };
 
-        let shared_pool = self.pool.clone();
+        let broken = self.pool.manager.is_closed(&mut conn.conn);
+        if broken {
+            let pool = self.pool.clone();
 
-        // ToDo: actix_rt doesn't have spawn error so we can't adjust spawned count accordingly.
-        #[cfg(feature = "actix-web")]
-        actix_rt::spawn(
-            async move {
-                let broken = shared_pool.manager.is_closed(&mut conn.conn);
-                if broken {
-                    let _r = shared_pool.drop_connection(conn).await;
-                } else {
-                    shared_pool.put_back_conn(conn);
-                };
-                Ok(())
-            }
-                .boxed_local()
-                .compat(),
-        );
+            #[cfg(feature = "default")]
+            let _ = tokio_executor::DefaultExecutor::current()
+                .spawn(Box::pin(async move {
+                    let _ = pool.drop_connection(conn).await;
+                }))
+                .map_err(|_| {
+                    self.pool.decr_spawn(1);
+                });
 
-        #[cfg(feature = "default")]
-        let _ = tokio_executor::DefaultExecutor::current()
-            .spawn(Box::pin(async move {
-                let broken = shared_pool.manager.is_closed(&mut conn.conn);
-                if broken {
-                    let _r = shared_pool.drop_connection(conn).await;
-                } else {
-                    shared_pool.put_back_conn(conn);
+            // ToDo: actix_rt doesn't have spawn error so we can't adjust spawned count accordingly.
+            #[cfg(feature = "actix-web")]
+            actix_rt::spawn(
+                async move {
+                    let _ = pool.drop_connection(conn).await;
+                    Ok(())
                 }
-            }))
-            .map_err(|_| {
-                self.pool.decr_spawn(1);
-            });
+                    .boxed_local()
+                    .compat(),
+            );
+        } else {
+            self.pool.put_back_conn(conn);
+        };
     }
 }
 

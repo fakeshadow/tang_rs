@@ -38,4 +38,3 @@ branch = "std_future"
 [dependencies.tang-rs]
 path = "../../"
 features = [ "default", "tokio-postgres" ]
-

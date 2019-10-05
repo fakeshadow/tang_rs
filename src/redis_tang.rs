@@ -4,7 +4,7 @@ use std::pin::Pin;
 use futures::TryFutureExt;
 use redis::{aio::SharedConnection, Client, IntoConnectionInfo, RedisError};
 
-use crate::manager::Manager;
+use crate::manager::{Manager, ManagerFuture};
 use std::fmt;
 
 #[derive(Clone)]
@@ -25,9 +25,7 @@ impl Manager for RedisManager {
     type Connection = SharedConnection;
     type Error = RedisPoolError;
 
-    fn connect<'a>(
-        &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Self::Connection, Self::Error>> + Send + 'a>> {
+    fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
         Box::pin(self.client.get_shared_async_connection().err_into())
     }
 

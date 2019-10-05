@@ -76,7 +76,7 @@ fn main() {
     let cfg = Config::build(Environment::Production)
         .address("localhost")
         .port(8000)
-        .workers(36)
+        .workers(24)
         .keep_alive(10)
         .expect("Failed to build Rocket Config");
 
@@ -99,7 +99,7 @@ async fn index(
     // pool.get return the Conn and a reference of pool so that we can use the connection outside a closure.
     let mut pool_ref = pool.get().await.map_err(MyError::from)?;
 
-    let (client, statements) = pool_ref.get_conn();
+    let (client, statements) = &mut *pool_ref;
 
     let (t, u): (Vec<Topic>, Vec<u32>) = client
         .query(statements.get(0).unwrap(), &[&IDS])
@@ -127,8 +127,8 @@ async fn index(
 
 #[get("/redis")]
 async fn index2(pool: State<'_, Pool<RedisManager>>) -> Result<String, Debug<std::io::Error>> {
-    let mut pool_ref = pool.get().await.map_err(MyError::from)?;
-    let client = pool_ref.get_conn();
+    let pool_ref = pool.get().await.map_err(MyError::from)?;
+    let client = &*pool_ref;
 
     // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
     // the client var we shadowed is from redis query return and last till the function end.

@@ -61,7 +61,9 @@ async fn main() -> std::io::Result<()> {
         .await
         .map_err(|e| {
             match e {
-                PostgresPoolError::Inner(e) => println!("{:?}", e),
+                PostgresPoolError::Inner(e) => {
+                    println!("inner error is from tokio-postgres::Error. {:?}", e)
+                }
                 PostgresPoolError::TimeOut => (),
             };
             std::io::Error::new(std::io::ErrorKind::Other, "place holder error")
@@ -108,7 +110,8 @@ async fn main() -> std::io::Result<()> {
 
     let mut pool_ref = pool_redis.get().await.expect("Failed to get redis pool");
 
-    let client = pool_ref.get_conn();
+    // deref and deref_mut can also be used instead of get_conn()
+    let client = &*pool_ref;
 
     // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
     // the client var we shadowed is from redis query return and last till the function end.

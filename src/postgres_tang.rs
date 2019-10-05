@@ -9,7 +9,7 @@ use tokio_postgres::{
     Client, Config, Error, Socket, Statement,
 };
 
-use crate::manager::Manager;
+use crate::manager::{Manager, ManagerFuture};
 
 #[derive(Clone)]
 pub struct PostgresManager<Tls>
@@ -79,9 +79,7 @@ where
     type Connection = (Client, Vec<Statement>);
     type Error = PostgresPoolError;
 
-    fn connect<'a>(
-        &'a self,
-    ) -> Pin<Box<dyn Future<Output = Result<Self::Connection, Self::Error>> + Send + 'a>> {
+    fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
         Box::pin(async move {
             let (mut c, conn) = self.config.connect(tokio_postgres::NoTls).await?;
             tokio_executor::spawn(conn.map(|_| ()));
