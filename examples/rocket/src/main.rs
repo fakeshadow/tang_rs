@@ -106,7 +106,10 @@ async fn index(
         .try_fold(
             (Vec::with_capacity(20), Vec::with_capacity(20)),
             |(mut t, mut u), r| {
-                u.push(r.get(1));
+                let uid: u32 = r.get(1);
+                if !u.contains(&uid) {
+                    u.push(uid);
+                }
                 t.push(r.into());
                 futures::future::ok((t, u))
             },

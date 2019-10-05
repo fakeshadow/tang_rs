@@ -89,8 +89,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crossbeam_queue::{ArrayQueue, SegQueue};
-use futures::channel::oneshot::{channel, Sender};
+use crossbeam_queue::ArrayQueue;
 #[cfg(feature = "actix-web")]
 use futures::{compat::Future01CompatExt, FutureExt, TryFutureExt};
 #[cfg(feature = "default")]
@@ -109,6 +108,7 @@ pub use postgres_tang::{PostgresManager, PostgresPoolError};
 pub use redis_tang::{RedisManager, RedisPoolError};
 
 use crate::manager::ManagerFuture;
+use crate::waiter::{WaitersLock, Waiting};
 
 mod builder;
 mod manager;
@@ -116,6 +116,7 @@ mod manager;
 mod postgres_tang;
 #[cfg(feature = "redis")]
 mod redis_tang;
+mod waiter;
 
 pub struct Conn<M: Manager> {
     conn: M::Connection,
@@ -162,7 +163,7 @@ struct SharedPool<M: Manager> {
     statics: Builder,
     manager: M,
     pool: ArrayQueue<IdleConn<M>>,
-    queue: SegQueue<Sender<Conn<M>>>,
+    waiters: WaitersLock,
     spawned: AtomicU8,
 }
 
@@ -180,16 +181,15 @@ impl<M: Manager> SharedPool<M> {
     }
 
     fn put_back_conn(&self, conn: Conn<M>) {
-        let mut conn = conn;
-        while let Ok(tx) = self.queue.pop() {
-            match tx.send(conn) {
-                Ok(()) => return,
-                Err(c) => conn = c,
+        // when we push the connection back to pool successfully.
+        // we lock the WaitersLock and wake the futures if there is any.
+        match self.pool.push(conn.into()) {
+            Ok(()) => {
+                self.waiters.wake_one();
             }
-        }
-
-        if self.pool.push(conn.into()).is_err() {
-            self.decr_spawn(1);
+            Err(_) => {
+                self.decr_spawn(1);
+            }
         }
     }
 
@@ -318,7 +318,8 @@ impl<M: Manager> Pool<M> {
             statics: builder,
             manager,
             pool: ArrayQueue::new(size),
-            queue: SegQueue::new(),
+            //            queue: SegQueue::new(),
+            waiters: WaitersLock::new(),
             spawned: AtomicU8::new(0),
         });
 
@@ -380,33 +381,22 @@ impl<M: Manager> Pool<M> {
                         pool.add_connection().await?;
                     }
 
-                    let (tx, rx) = channel();
-                    pool.queue.push(tx);
-
-                    // we return error if the timeout reached when waiting for the queue.
-                    #[cfg(feature = "default")]
-                    match rx.timeout(pool.statics.queue_timeout).await? {
-                        Ok(conn) => conn,
-                        Err(e) => {
-                            if retry > 3 {
-                                return Err(e.into());
-                            } else {
-                                retry += 1;
-                                return self.get_idle_connection(retry).await;
-                            }
-                        }
-                    }
                     #[cfg(feature = "actix-web")]
-                    match Timeout::new(rx.boxed().compat(), pool.statics.queue_timeout)
-                        .compat()
-                        .await
+                    match Timeout::new(
+                        self.wait().boxed().unit_error().compat(),
+                        pool.statics.wait_timeout,
+                    )
+                    .compat()
+                    .await
                     {
-                        Ok(conn) => conn,
+                        Ok(conn) => conn.into(),
                         Err(_) => {
                             retry += 1;
                             return self.get_idle_connection(retry).await;
                         }
                     }
+                    #[cfg(feature = "default")]
+                    self.wait().timeout(pool.statics.wait_timeout).await?.into()
                 }
             };
 
@@ -434,6 +424,10 @@ impl<M: Manager> Pool<M> {
             }
             Ok(conn)
         })
+    }
+
+    fn wait(&self) -> Waiting<M> {
+        Waiting::new(&self.0.pool, &self.0.waiters)
     }
 
     pub fn state(&self) -> State {
@@ -499,6 +493,7 @@ impl<M: Manager> PoolRef<'_, M> {
 }
 
 impl<M: Manager> Drop for PoolRef<'_, M> {
+    #[inline]
     fn drop(&mut self) {
         let mut conn = match self.conn.take() {
             Some(conn) => conn,

@@ -10,7 +10,7 @@ pub struct Builder {
     pub(crate) max_lifetime: Option<Duration>,
     pub(crate) idle_timeout: Option<Duration>,
     pub(crate) connection_timeout: Duration,
-    pub(crate) queue_timeout: Duration,
+    pub(crate) wait_timeout: Duration,
     pub(crate) reaper_rate: Duration,
 }
 
@@ -23,7 +23,7 @@ impl Default for Builder {
             max_lifetime: Some(Duration::from_secs(30 * 60)),
             idle_timeout: Some(Duration::from_secs(10 * 60)),
             connection_timeout: Duration::from_secs(10),
-            queue_timeout: Duration::from_secs(20),
+            wait_timeout: Duration::from_secs(20),
             reaper_rate: Duration::from_secs(15),
         }
     }
@@ -102,8 +102,8 @@ impl Builder {
     /// Similar to connection_timeout. A time out error will return.
     ///
     /// Default 20 seconds
-    pub fn wait_timeout(mut self, queue_timeout: Duration) -> Builder {
-        self.queue_timeout = queue_timeout;
+    pub fn wait_timeout(mut self, wait_timeout: Duration) -> Builder {
+        self.wait_timeout = wait_timeout;
         self
     }
 
