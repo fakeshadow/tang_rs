@@ -116,7 +116,7 @@ impl Builder {
 
         let pool = Pool::new(self, manager);
         #[cfg(feature = "default")]
-        pool.0.replenish_idle_connections().await?;
+        pool.0.replenish_idle_connections().await??;
         #[cfg(feature = "actix-web")]
         pool.0.replenish_idle_connections_temp().await?;
 

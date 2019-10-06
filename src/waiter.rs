@@ -1,15 +1,16 @@
 use std::future::Future;
 use std::mem;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
-use crossbeam_queue::ArrayQueue;
 use parking_lot::Mutex;
 use slab::Slab;
+use tokio_executor::TypedExecutor;
 
-use crate::{manager::Manager, IdleConn};
+use crate::{manager::Manager, IdleConn, SharedPool};
 
-pub(crate) const WAIT_KEY_NONE: usize = std::usize::MAX;
+const WAIT_KEY_NONE: usize = std::usize::MAX;
 
 // an enum to determine the state of a `Waker`.
 enum Waiter {
@@ -20,7 +21,7 @@ enum Waiter {
 impl Waiter {
     #[inline]
     fn register(&mut self, w: &Waker) {
-        // if the newly waker will wake the old one then we just ignore the register.
+        // if the new waker will wake the old one then we just ignore the register.
         // otherwise we overwrite the old waker.
         match self {
             Waiter::Waiting(waker) if w.will_wake(waker) => {}
@@ -37,7 +38,7 @@ impl Waiter {
     }
 }
 
-/// WaitersLock holds all the futures' Wakers that are waiting for a connection.
+// WaitersLock holds all the futures' wakers that are waiting for a connection.
 pub(crate) struct WaitersLock(Mutex<Slab<Waiter>>);
 
 impl WaitersLock {
@@ -75,14 +76,14 @@ impl WaitersLock {
 // Waiting return a future of `IdleConn`.
 // When pool is empty we construct a `Waiting`. In the `Future` we pass it's `Waker` to `WaitersLock`.
 // Then when a connection is returned to pool we lock the `WaitersLock` and wake the `Wakers` inside it to notify `Waiting` it's time to continue.
-pub(crate) struct Waiting<'a, M: Manager> {
-    pool: &'a ArrayQueue<IdleConn<M>>,
+pub(crate) struct Waiting<'a, M: Manager + Send> {
+    pool: &'a Arc<SharedPool<M>>,
     waiters: Option<&'a WaitersLock>,
     wait_key: usize,
 }
 
-impl<'a, M: Manager> Waiting<'a, M> {
-    pub(crate) fn new(pool: &'a ArrayQueue<IdleConn<M>>, waiters: &'a WaitersLock) -> Self {
+impl<'a, M: Manager + Send> Waiting<'a, M> {
+    pub(crate) fn new(pool: &'a Arc<SharedPool<M>>, waiters: &'a WaitersLock) -> Self {
         Waiting {
             pool,
             waiters: Some(waiters),
@@ -91,7 +92,7 @@ impl<'a, M: Manager> Waiting<'a, M> {
     }
 }
 
-impl<'a, M: Manager> Drop for Waiting<'a, M> {
+impl<M: Manager + Send> Drop for Waiting<'_, M> {
     #[inline]
     fn drop(&mut self) {
         if let Some(waiters) = self.waiters {
@@ -100,17 +101,28 @@ impl<'a, M: Manager> Drop for Waiting<'a, M> {
     }
 }
 
-impl<'a, M: Manager> Future for Waiting<'a, M> {
+impl<M: Manager + Send> Future for Waiting<'_, M> {
     type Output = IdleConn<M>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let waiters = self.waiters.expect("polled after complete");
 
-        // if we get a connection then we remove the waker by key.
-        if let Ok(conn) = self.pool.pop() {
+        // if we get a connection then we remove the waker by wait key.
+        if let Ok(conn) = self.pool.pool.pop() {
             waiters.remove_waker(self.wait_key, false);
             self.waiters = None;
             return Poll::Ready(conn);
+        }
+
+        // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
+        if self.pool.load_spawn() < self.pool.statics.max_size {
+            let pool = self.pool.clone();
+            self.pool.incr_spawn(1);
+            let _ = tokio_executor::DefaultExecutor::current()
+                .spawn(Box::pin(async move {
+                    let _ = pool.add_connection().await;
+                }))
+                .map_err(|_| self.pool.decr_spawn(1));
         }
 
         // otherwise we lock WaitersLock and either insert our waker if we don't have a wait key yet
@@ -124,14 +136,19 @@ impl<'a, M: Manager> Future for Waiting<'a, M> {
             }
         }
 
-        // double check to make sure if we can get a connection.
-        // If we can then we just undone the previous steps and return with our connection.
-        if let Ok(conn) = self.pool.pop() {
-            waiters.remove_waker(self.wait_key, false);
-            self.waiters = None;
-            return Poll::Ready(conn);
-        }
+        //        // double check to make sure if we can get a connection.
+        //        // If we can then we just undone the previous steps and return with our connection.
+        //        if let Ok(conn) = self.pool.pop() {
+        //            waiters.remove_waker(self.wait_key, false);
+        //            self.waiters = None;
+        //            return Poll::Ready(conn);
+        //        }
 
         Poll::Pending
     }
 }
+
+//unsafe impl Send for WaitersLock {}
+//unsafe impl Sync for WaitersLock {}
+//unsafe impl< M: Manager + Send> Send for Waiting<'_, M> {}
+//unsafe impl< M: Manager + Send> Sync for Waiting<'_, M> {}

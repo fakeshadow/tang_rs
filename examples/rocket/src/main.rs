@@ -151,7 +151,7 @@ impl From<PostgresPoolError> for MyError {
     fn from(e: PostgresPoolError) -> MyError {
         match e {
             PostgresPoolError::Inner(_e) => println!("inner is tokio_postgres::Error"),
-            PostgresPoolError::TimeOut => (),
+            PostgresPoolError::TimeOut => println!("connection is canceled because of timeout"),
         };
         MyError
     }
@@ -161,7 +161,7 @@ impl From<RedisPoolError> for MyError {
     fn from(e: RedisPoolError) -> MyError {
         match e {
             RedisPoolError::Inner(_e) => println!("inner is redis::RedisError"),
-            RedisPoolError::TimeOut => (),
+            RedisPoolError::TimeOut => println!("connection is canceled because of timeout"),
         };
         MyError
     }
