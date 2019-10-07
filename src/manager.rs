@@ -5,14 +5,10 @@ use std::pin::Pin;
 pub(crate) type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// trait come from bb8.
-#[cfg(feature = "default")]
+#[cfg(not(feature = "actix-web"))]
 pub trait Manager: Send + Sync + 'static {
     type Connection: Send + 'static;
-    type Error: Send
-        + 'static
-        + Debug
-        + From<tokio_timer::timeout::Elapsed>
-        + From<futures::channel::oneshot::Canceled>;
+    type Error: Send + 'static + Debug + From<tokio_timer::timeout::Elapsed>;
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>>;
 
