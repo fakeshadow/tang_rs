@@ -307,7 +307,7 @@ impl<M: Manager> SharedPool<M> {
             }
 
             if should_drop {
-                let _ = self.drop_connection(conn.into()).await;
+                self.drop_connection(conn.into()).await??;
             } else {
                 self.pool_lock.put_back(conn);
             }
@@ -386,8 +386,7 @@ impl<M: Manager> Pool<M> {
         Ok(result?)
     }
 
-    /// recursive when the connection is broken or we get an error from oneshot channel.
-    /// we exit with at most 3 retries.
+    /// recursive when the connection is broken. we exit with at most 3 retries.
     fn get_idle_connection(&self, mut retry: u8) -> ManagerFuture<Result<Conn<M>, M::Error>> {
         Box::pin(async move {
             let pool = &self.0;
@@ -409,7 +408,7 @@ impl<M: Manager> Pool<M> {
             .await
             {
                 Ok(conn) => conn.into(),
-                Err(_) => {
+                Err(_e) => {
                     retry += 1;
                     return self.get_idle_connection(retry).await;
                 }
