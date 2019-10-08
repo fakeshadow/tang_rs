@@ -189,15 +189,26 @@ impl<M: Manager + Send> PoolLock<M> {
         lock.spawned
     }
 
-    pub(crate) fn try_pop_pending(&self) -> Option<Pending> {
-        if let Ok(mut inner) = self.inner.try_lock() {
-            return inner.pending.pop_front();
-        }
-        None
+    // ToDo: use try peek to remove pendings that last for too long
+
+    //    pub(crate) fn try_peek_pending<F>(&self, f: F)
+    //    where
+    //        F: FnOnce(Option<&Pending>) -> bool,
+    //    {
+    //        if let Ok(mut inner) = self.inner.try_lock() {
+    //            let pending = inner.pending.front();
+    //            if f(pending) {
+    //                inner.pending.pop_front();
+    //            }
+    //        }
+    //    }
+
+    pub(crate) fn pop_pending(&self) -> Option<Pending> {
+        self.inner.lock().unwrap().pending.pop_front()
     }
 
     pub(crate) fn try_pop_conn(&self) -> Option<IdleConn<M>> {
-        if let Ok(mut inner) = self.inner.try_lock() {
+        if let Ok(mut inner) = self.inner.lock() {
             return inner.conn.pop_front();
         }
         None

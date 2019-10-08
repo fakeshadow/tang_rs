@@ -197,7 +197,7 @@ impl<M: Manager> SharedPool<M> {
             .timeout(self.statics.connection_timeout)
             .await
             .map_err(|e| {
-                self.pool_lock.try_pop_pending();
+                self.pool_lock.pop_pending();
                 e
             })?;
 
@@ -205,7 +205,7 @@ impl<M: Manager> SharedPool<M> {
         let conn = match result {
             Ok(conn) => conn,
             Err(e) => {
-                self.pool_lock.try_pop_pending();
+                self.pool_lock.pop_pending();
                 return Ok(Err(e));
             }
         };
@@ -218,7 +218,7 @@ impl<M: Manager> SharedPool<M> {
         .compat()
         .await
         .map_err(|e| {
-            self.pool_lock.try_pop_pending();
+            self.pool_lock.pop_pending();
             e
         })?;
 
@@ -282,7 +282,7 @@ impl<M: Manager> SharedPool<M> {
                 .connect()
                 .await
                 .map_err(|e| {
-                    self.pool_lock.try_pop_pending();
+                    self.pool_lock.pop_pending();
                     e
                 })
                 .unwrap();
