@@ -6,8 +6,11 @@ extern crate rocket;
 extern crate serde_derive;
 
 use std::convert::From;
+use std::future::Future;
+use std::pin::Pin;
 
-use futures::TryStreamExt;
+use futures::task::Context;
+use futures::Poll;
 use rocket::{
     config::{Config, Environment},
     response::{content, Debug},
@@ -97,29 +100,19 @@ async fn index(
     pool: State<'_, Pool<PostgresManager<tokio_postgres::NoTls>>>,
 ) -> Result<content::Json<String>, Debug<std::io::Error>> {
     // pool.get return the Conn and a reference of pool so that we can use the connection outside a closure.
-    let mut pool_ref = pool.get().await.map_err(MyError::from)?;
+    let pool_ref = pool.get().await.map_err(MyError::from)?;
 
-    let (client, statements) = &mut *pool_ref;
+    let (client, statements) = &*pool_ref;
 
-    let (t, u): (Vec<Topic>, Vec<u32>) = client
+    let (t, u) = client
         .query(statements.get(0).unwrap(), &[&IDS])
-        .try_fold(
-            (Vec::with_capacity(20), Vec::with_capacity(20)),
-            |(mut t, mut u), r| {
-                let uid: u32 = r.get(1);
-                if !u.contains(&uid) {
-                    u.push(uid);
-                }
-                t.push(r.into());
-                futures::future::ok((t, u))
-            },
-        )
         .await
-        .expect("Failed to query postgres");
+        .expect("Failed to query postgres")
+        .parse()
+        .await;
 
-    let _u = client
+    let _rows = client
         .query(statements.get(1).unwrap(), &[&u])
-        .try_collect::<Vec<Row>>()
         .await
         .expect("Failed to query postgres");
 
@@ -173,6 +166,48 @@ impl From<MyError> for Debug<std::io::Error> {
     }
 }
 
+struct ParseRow<'a> {
+    rows: &'a [Row],
+}
+
+trait ParseRowTrait {
+    fn parse(&self) -> ParseRow<'_>;
+}
+
+impl ParseRowTrait for Vec<Row> {
+    fn parse(&self) -> ParseRow<'_> {
+        ParseRow { rows: &self }
+    }
+}
+
+impl Future for ParseRow<'_> {
+    type Output = (Vec<Topic>, Vec<u32>);
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut t: Vec<Topic> = Vec::with_capacity(20);
+        let mut u = Vec::with_capacity(20);
+
+        for r in self.rows.iter() {
+            let uid: u32 = r.get(1);
+            if !u.contains(&uid) {
+                u.push(uid);
+            }
+            t.push(Topic {
+                id: r.get(0),
+                user_id: r.get(1),
+                category_id: r.get(2),
+                title: r.get(3),
+                body: r.get(4),
+                thumbnail: r.get(5),
+                is_locked: r.get(8),
+                is_visible: r.get(9),
+            });
+        }
+
+        Poll::Ready((t, u))
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct Topic {
     pub id: u32,
@@ -183,19 +218,4 @@ struct Topic {
     pub thumbnail: String,
     pub is_locked: bool,
     pub is_visible: bool,
-}
-
-impl From<Row> for Topic {
-    fn from(r: Row) -> Topic {
-        Topic {
-            id: r.get(0),
-            user_id: r.get(1),
-            category_id: r.get(2),
-            title: r.get(3),
-            body: r.get(4),
-            thumbnail: r.get(5),
-            is_locked: r.get(8),
-            is_visible: r.get(9),
-        }
-    }
 }

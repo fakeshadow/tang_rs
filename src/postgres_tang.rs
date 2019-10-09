@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::{borrow::Cow, fmt, str::FromStr};
 
-use futures::{future::Either, FutureExt, TryFutureExt, TryStreamExt};
+use futures::{FutureExt, TryFutureExt, TryStreamExt};
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
     types::Type,
@@ -70,8 +70,7 @@ where
 
 impl<Tls> Manager for PostgresManager<Tls>
 where
-    //    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
-    Tls: MakeTlsConnect<Socket> + Send + Sync + 'static,
+    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
     Tls::Stream: Send,
     Tls::TlsConnect: Send,
     <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
@@ -81,7 +80,7 @@ where
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
         Box::pin(async move {
-            let (mut c, conn) = self.config.connect(tokio_postgres::NoTls).await?;
+            let (c, conn) = self.config.connect(self.tls.clone()).await?;
             tokio_executor::spawn(conn.map(|_| ()));
 
             let prepares = &self.prepares;
@@ -92,11 +91,12 @@ where
 
                 for p in prepares.iter() {
                     let PreparedStatement(query, types) = p;
-                    if types.len() > 0 {
-                        vec.push(Either::Right(c.prepare_typed(query, types)));
-                    } else {
-                        vec.push(Either::Left(c.prepare(query)));
-                    }
+                    vec.push(c.prepare_typed(query, &types));
+                    //                    if types.len() > 0 {
+                    //                        vec.push(c.prepare_typed(query, &types));
+                    //                    } else {
+                    //                        vec.push(c.prepare_typed(query, &[]));
+                    //                    }
                 }
 
                 let vec = futures::future::join_all(vec).await;

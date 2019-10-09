@@ -31,6 +31,9 @@ features = [ "compat", "async-await" ]
 [dependencies.tokio-postgres]
 git = "https://github.com/sfackler/rust-postgres"
 
+[dependencies.postgres-types]
+git = "https://github.com/sfackler/rust-postgres"
+
 [dependencies.redis]
 git = "https://github.com/fakeshadow/redis-rs"
 branch = "std_future"

@@ -7,6 +7,7 @@ pub struct Builder {
     pub(crate) max_size: u8,
     pub(crate) min_idle: u8,
     pub(crate) always_check: bool,
+    pub(crate) use_gc: bool,
     pub(crate) max_lifetime: Option<Duration>,
     pub(crate) idle_timeout: Option<Duration>,
     pub(crate) connection_timeout: Duration,
@@ -20,6 +21,7 @@ impl Default for Builder {
             max_size: 10,
             min_idle: 1,
             always_check: true,
+            use_gc: false,
             max_lifetime: Some(Duration::from_secs(30 * 60)),
             idle_timeout: Some(Duration::from_secs(10 * 60)),
             connection_timeout: Duration::from_secs(10),
@@ -46,9 +48,21 @@ impl Builder {
 
     /// If true, the health of a connection will be verified when checkout.
     ///
+    /// This check uses `Builder`'s `connection_timeout` setting to cancel the check and return a timeout error.
+    ///
     /// Defaults to true.
     pub fn always_check(mut self, always_check: bool) -> Builder {
         self.always_check = always_check;
+        self
+    }
+
+    /// If true, the pending connections that last for too long will be removed.( 6 times the `connection_timeout` duration)
+    ///
+    /// This is a placeholder feature. it works fine but in most cases it's not necessary or useful.
+    ///
+    /// Defaults to false.
+    pub fn use_gc(mut self, use_gc: bool) -> Builder {
+        self.use_gc = use_gc;
         self
     }
 
@@ -57,7 +71,7 @@ impl Builder {
     /// If set, connections will be closed at the next reaping after surviving
     /// past this duration.
     ///
-    /// If a connection reachs its maximum lifetime while checked out it will be
+    /// If a connection reaches its maximum lifetime while checked out it will be
     /// closed when it is returned to the pool.
     ///
     /// Defaults to 30 minutes.
@@ -79,9 +93,10 @@ impl Builder {
 
     /// Sets the connection reaper rate.
     ///
-    /// The connection that are idle and live beyond the time gate will be dropped..
+    /// The connection that are idle and live beyond the time gate will be dropped.
     ///
     /// Default 15 seconds and only one connection will be checked in each interval.
+    /// (no guarantee as we don't force lock the pool.)
     pub fn reaper_rate(mut self, reaper_rate: Duration) -> Builder {
         self.reaper_rate = reaper_rate;
         self
@@ -89,7 +104,9 @@ impl Builder {
 
     /// Sets the connection timeout used by the pool.
     ///
-    /// The closure of pool.run() and the pool.get() method will cancel and return a timeout error.
+    /// Attempt to establish new connection to database will be canceled and return a timeout error if this Duration passed.
+    ///
+    /// It's recommended to set this duration the same or a bit longer than your database connection timeout setting.
     ///
     /// Default 10 seconds.
     pub fn connection_timeout(mut self, connection_timeout: Duration) -> Builder {
@@ -99,7 +116,7 @@ impl Builder {
 
     /// Sets the wait timeout used by the queue.
     ///
-    /// Similar to connection_timeout. A time out error will return.
+    /// Similar to `connection_timeout`. A timeout error will return if we wait too long for a connection from pool.
     ///
     /// Default 20 seconds
     pub fn wait_timeout(mut self, wait_timeout: Duration) -> Builder {
@@ -107,7 +124,7 @@ impl Builder {
         self
     }
 
-    /// Consumes the builder, returning a new, initialized `Pool`.
+    /// Consumes the `Builder`, returning a new, initialized `Pool`.
     pub async fn build<M: Manager>(self, manager: M) -> Result<Pool<M>, M::Error> {
         assert!(
             self.max_size >= self.min_idle,

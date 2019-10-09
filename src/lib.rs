@@ -27,7 +27,6 @@
 //!        ];
 //!
 //!    // setup manager
-//!    // only support NoTls for now
 //!    let mgr =
 //!        PostgresManager::new_from_stringlike(
 //!            db_url,
@@ -160,9 +159,6 @@ impl<M: Manager> From<IdleConn<M>> for Conn<M> {
     }
 }
 
-/// `crossbeam_queue::ArrayQueue` is used to manage the pool.
-/// `parking_lot::Mutex` is used to manage the waiting queue.
-/// `AtomicU8` is used to track the total amount of `Conn + IdleConn`
 struct SharedPool<M: Manager> {
     statics: Builder,
     manager: M,
@@ -224,7 +220,7 @@ impl<M: Manager> SharedPool<M> {
 
         let conn = IdleConn::new(conn);
 
-        self.pool_lock.pub_back_incr_spawn_count(conn);
+        self.pool_lock.put_back_incr_spawn_count(conn);
 
         Ok(Ok(()))
     }
@@ -289,7 +285,7 @@ impl<M: Manager> SharedPool<M> {
 
             let conn = IdleConn::new(conn);
 
-            self.pool_lock.pub_back_incr_spawn_count(conn.into());
+            self.pool_lock.put_back_incr_spawn_count(conn.into());
         }
         Ok(())
     }
@@ -314,6 +310,16 @@ impl<M: Manager> SharedPool<M> {
         }
 
         Ok(())
+    }
+
+    fn garbage_collect(&self) {
+        self.pool_lock.try_peek_pending(|pending| {
+            let pending = match pending {
+                Some(pending) => pending,
+                None => return false,
+            };
+            pending.should_remove(self.statics.connection_timeout)
+        });
     }
 }
 
@@ -343,6 +349,8 @@ impl<M: Manager> Pool<M> {
 
         // spawn a loop interval future to handle the lifetime and time out of connections.
         schedule_one_reaping(&shared_pool);
+
+        garbage_collect(&shared_pool);
 
         Pool(shared_pool)
     }
@@ -386,7 +394,7 @@ impl<M: Manager> Pool<M> {
         Ok(result?)
     }
 
-    /// recursive when the connection is broken. we exit with at most 3 retries.
+    // recursive when the connection is broken. we exit with at most 3 retries.
     fn get_idle_connection(&self, mut retry: u8) -> ManagerFuture<Result<Conn<M>, M::Error>> {
         Box::pin(async move {
             let pool = &self.0;
@@ -524,6 +532,21 @@ fn schedule_one_reaping<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
             loop {
                 let _i = interval.next().await;
                 let _ = shared.reap_connections().await;
+            }
+        });
+    }
+}
+
+// schedule garbage collection runs in a spawned future.
+fn garbage_collect<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
+    if shared.statics.use_gc {
+        let mut interval = Interval::new_interval(shared.statics.reaper_rate * 6);
+        let shared = shared.clone();
+
+        tokio_executor::spawn(async move {
+            loop {
+                let _i = interval.next().await;
+                shared.garbage_collect();
             }
         });
     }

@@ -7,9 +7,12 @@ use actix_web::{
     web::{self, Data},
     App, Error, HttpResponse, HttpServer,
 };
-use futures::{FutureExt, TryFutureExt, TryStreamExt};
+use futures::{FutureExt, TryFutureExt};
 use tokio_postgres::{types::Type, NoTls, Row};
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
 
 #[tokio::main]
@@ -85,29 +88,22 @@ async fn test_async(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResp
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];
 
-    let mut pool_ref = pool
+    let pool_ref = pool
         .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 
-    let (client, statements) = &mut *pool_ref;
+    let (client, statements) = &*pool_ref;
 
     let (t, u): (Vec<Topic>, Vec<u32>) = client
         .query(statements.get(0).unwrap(), &[&ids])
-        .try_fold(
-            (Vec::with_capacity(20), Vec::with_capacity(20)),
-            |(mut t, mut u), r| {
-                u.push(r.get(1));
-                t.push(r.into());
-                futures::future::ok((t, u))
-            },
-        )
         .await
-        .map_err(|_| ErrorInternalServerError("lol"))?;
+        .map_err(|_| ErrorInternalServerError("lol"))?
+        .parse()
+        .await;
 
-    let _u = client
+    let _rows = client
         .query(statements.get(1).unwrap(), &[&u])
-        .try_collect::<Vec<Row>>()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 
@@ -143,6 +139,48 @@ async fn test_redisasync(pool: Data<Pool<RedisManager>>) -> Result<HttpResponse,
     Ok(HttpResponse::Ok().finish())
 }
 
+struct ParseRow<'a> {
+    rows: &'a [Row],
+}
+
+trait ParseRowTrait {
+    fn parse(&self) -> ParseRow<'_>;
+}
+
+impl ParseRowTrait for Vec<Row> {
+    fn parse(&self) -> ParseRow<'_> {
+        ParseRow { rows: &self }
+    }
+}
+
+impl Future for ParseRow<'_> {
+    type Output = (Vec<Topic>, Vec<u32>);
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut t: Vec<Topic> = Vec::with_capacity(20);
+        let mut u = Vec::with_capacity(20);
+
+        for r in self.rows.iter() {
+            let uid: u32 = r.get(1);
+            if !u.contains(&uid) {
+                u.push(uid);
+            }
+            t.push(Topic {
+                id: r.get(0),
+                user_id: r.get(1),
+                category_id: r.get(2),
+                title: r.get(3),
+                body: r.get(4),
+                thumbnail: r.get(5),
+                is_locked: r.get(8),
+                is_visible: r.get(9),
+            });
+        }
+
+        Poll::Ready((t, u))
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct Topic {
     pub id: u32,
@@ -153,19 +191,4 @@ struct Topic {
     pub thumbnail: String,
     pub is_locked: bool,
     pub is_visible: bool,
-}
-
-impl From<Row> for Topic {
-    fn from(r: Row) -> Self {
-        Topic {
-            id: r.get(0),
-            user_id: r.get(1),
-            category_id: r.get(2),
-            title: r.get(3),
-            body: r.get(4),
-            thumbnail: r.get(5),
-            is_locked: r.get(8),
-            is_visible: r.get(9),
-        }
-    }
 }

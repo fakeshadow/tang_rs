@@ -1,4 +1,3 @@
-use futures::TryStreamExt;
 use tang_rs::{Builder, PostgresManager, PostgresPoolError, RedisManager};
 
 #[tokio::main]
@@ -16,7 +15,6 @@ async fn main() -> std::io::Result<()> {
     ];
 
     // setup manager
-    // only support NoTls for now
     let mgr = PostgresManager::new_from_stringlike(db_url, statements, tokio_postgres::NoTls)
         .unwrap_or_else(|_| panic!("can't make postgres manager"));
 
@@ -36,24 +34,21 @@ async fn main() -> std::io::Result<()> {
     tokio::timer::delay(std::time::Instant::now() + std::time::Duration::from_secs(1)).await;
 
     // run pool in closure. it's slightly faster than pool.get().
-    let _row = pool
-        .run(|mut conn| {
+    let _rows = pool
+        .run(|conn| {
             Box::pin(
                 // pin the async function to make sure the &mut Conn outlives our closure.
                 async move {
-                    let (client, statements) = &mut conn;
+                    let (client, statements) = &conn;
 
                     // statement index is the same as the input vector when building the pool.
                     let statement = statements.get(0).unwrap();
 
                     let ids = vec![1u32, 2, 3, 4, 5];
 
-                    let row = client
-                        .query(statement, &[&ids])
-                        .try_collect::<Vec<tokio_postgres::Row>>()
-                        .await?;
+                    let rows = client.query(statement, &[&ids]).await?;
 
-                    Ok::<_, PostgresPoolError>(row)
+                    Ok::<_, PostgresPoolError>(rows)
                     // infer type here so that u can use your custom error in the closure. you error type have to impl From<PostgresPoolError> or From<RedisPoolError>.
                 },
             )
@@ -75,15 +70,15 @@ async fn main() -> std::io::Result<()> {
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "place holder error"))?;
 
-    let (client, statements) = pool_ref.get_conn();
+    // use deref or deref mut to get our client from pool_ref
+    let (client, statements) = &*pool_ref;
 
     let statement = statements.get(0).unwrap();
 
     let ids = vec![1u32, 2, 3, 4, 5];
 
-    let _row = client
+    let _rows = client
         .query(statement, &[&ids])
-        .try_collect::<Vec<tokio_postgres::Row>>()
         .await
         .expect("Failed to get row");
 
@@ -92,7 +87,10 @@ async fn main() -> std::io::Result<()> {
 
     assert_eq!(true, conn.is_some());
 
-    // it's a good thing to drop the pool_ref right after you finished as the connection will be put back to pool when the poo_ref is dropped.
+    // the connection won't be return to pool unless we push it back manually.
+    pool_ref.push_conn(conn.unwrap());
+
+    // it's a good thing to drop the pool_ref right after you finished as the connection will be put back to pool when the pool_ref is dropped.
     drop(pool_ref);
 
     // build redis pool just like postgres pool
@@ -108,9 +106,8 @@ async fn main() -> std::io::Result<()> {
         .await
         .unwrap_or_else(|_| panic!("can't make redis pool"));
 
-    let mut pool_ref = pool_redis.get().await.expect("Failed to get redis pool");
+    let pool_ref = pool_redis.get().await.expect("Failed to get redis pool");
 
-    // deref and deref_mut can also be used instead of get_conn()
     let client = &*pool_ref;
 
     // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
