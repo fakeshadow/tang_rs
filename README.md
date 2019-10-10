@@ -7,6 +7,3 @@ a connection pool for tokio-postgres and redis-rs. support async/await syntex.
 
 #### Features:
 default features use tokio0.2 and have both tokio-postgres and redis-rs(std::future branch) as dependencies.
-<br>
-<br>
-tokio-executor and tokio-timer are mandatory features when you use `default-features = false`

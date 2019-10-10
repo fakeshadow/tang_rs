@@ -117,30 +117,21 @@ fn test_redis(pool: Data<Pool<RedisManager>>) -> impl Future01<Item = HttpRespon
 }
 
 async fn test_redisasync(pool: Data<Pool<RedisManager>>) -> Result<HttpResponse, Error> {
-    // you can also run code in closure like postgres pool. we skip that here.
-
-    // Your Error type have to impl From<redis::RedisError> or you can use default error type tang_rs::RedisPoolError
-    let pool_ref = pool
+    let mut pool_ref = pool
         .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 
-    let client = &*pool_ref;
+    let client = &mut *pool_ref;
 
-    // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
-    // the client var we shadowed is from redis query return and last till the function end.
-    let (client, ()) = redis::cmd("PING")
-        .query_async(client.clone())
+    redis::cmd("PING")
+        .query_async::<_, ()>(client)
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 
     drop(pool_ref);
 
     Ok(HttpResponse::Ok().finish())
-}
-
-struct ParseRow<'a> {
-    rows: &'a [Row],
 }
 
 trait ParseRowTrait {
@@ -151,6 +142,10 @@ impl ParseRowTrait for Vec<Row> {
     fn parse(&self) -> ParseRow<'_> {
         ParseRow { rows: &self }
     }
+}
+
+struct ParseRow<'a> {
+    rows: &'a [Row],
 }
 
 impl Future for ParseRow<'_> {

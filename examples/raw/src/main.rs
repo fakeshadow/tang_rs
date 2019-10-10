@@ -106,14 +106,12 @@ async fn main() -> std::io::Result<()> {
         .await
         .unwrap_or_else(|_| panic!("can't make redis pool"));
 
-    let pool_ref = pool_redis.get().await.expect("Failed to get redis pool");
+    let mut pool_ref = pool_redis.get().await.expect("Failed to get redis pool");
 
-    let client = &*pool_ref;
+    let client = &mut *pool_ref;
 
-    // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
-    // the client var we shadowed is from redis query return and last till the function end.
-    let (client, ()) = redis::cmd("PING")
-        .query_async(client.clone())
+    redis::cmd("PING")
+        .query_async::<_, ()>(client)
         .await
         .expect("Failed to ping redis pool");
 

@@ -15,11 +15,11 @@ name = "tang_rs"
 path = "src/lib.rs"
 
 [features]
-default = [ "tokio-timer", "tokio-executor", "tokio-postgres", "redis" ]
-actix-web = [ "tokio-timer", "tokio-timer01", "tokio-executor", "actix-rt", "tokio-postgres", "redis" ]
-with-mongodb = [ "tokio-timer", "tokio-executor", "mongodb" ]
-with-tokio-postgres = [ "tokio-timer", "tokio-executor", "tokio-postgres" ]
-with-redis = [ "tokio-timer", "tokio-executor", "redis" ]
+default = [ "tokio-postgres", "redis" ]
+actix-web = [ "tokio-timer01", "actix-rt", "tokio-postgres", "redis" ]
+with-mongodb = [ "mongodb" ]
+with-tokio-postgres = [ "tokio-postgres" ]
+with-redis = [ "redis" ]
 
 [workspace]
 members = [
@@ -27,7 +27,6 @@ members = [
   "examples/rocket",
   "examples/raw",
 ]
-
 
 [dependencies.actix-rt]
 version = "0.2.5"
@@ -37,16 +36,18 @@ optional = true
 version = "=0.3.0-alpha.19"
 features = [ "compat", "async-await" ]
 
+[dependencies.mongodb]
+optional = true
+version = "0.4.0"
+
 [dependencies.slab]
 version = "0.4.2"
 
 [dependencies.tokio-executor]
 version = "=0.2.0-alpha.6"
-optional = true
 
 [dependencies.tokio-timer]
 version = "=0.3.0-alpha.6"
-optional = true
 
 [dependencies.tokio-timer01]
 package= "tokio-timer"
@@ -60,8 +61,4 @@ git = "https://github.com/sfackler/rust-postgres"
 [dependencies.redis]
 optional = true
 git = "https://github.com/fakeshadow/redis-rs"
-branch = "std_future"
-
-[dependencies.mongodb]
-optional = true
-version = "0.4.0"
+branch = "async_await_api"

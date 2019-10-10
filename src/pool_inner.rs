@@ -44,7 +44,7 @@ struct HelperQueue {
 impl Default for HelperQueue {
     fn default() -> Self {
         HelperQueue {
-            queue: VecDeque::new(),
+            queue: VecDeque::with_capacity(128 * 128),
             last_key: WAIT_KEY_NONE,
         }
     }
@@ -55,6 +55,7 @@ impl HelperQueue {
         if self.last_key == wait_key {
             return;
         }
+
         if !self.queue.contains(&wait_key) {
             self.last_key = wait_key;
             self.queue.push_back(wait_key);
@@ -112,7 +113,7 @@ impl<M: Manager + Send> PoolLock<M> {
                 spawned: 0,
                 pending: VecDeque::with_capacity(pool_size),
                 conn: VecDeque::with_capacity(pool_size),
-                waiters: Slab::new(),
+                waiters: Slab::with_capacity(128 * 128),
                 waiters_queue: Default::default(),
             }),
         }
@@ -127,6 +128,7 @@ impl<M: Manager + Send> PoolLock<M> {
         }
     }
 
+    #[inline]
     pub(crate) fn lock<'a>(&'a self, shared_pool: &'a Arc<SharedPool<M>>) -> PoolLockFuture<'a, M> {
         PoolLockFuture {
             shared_pool,
@@ -137,6 +139,7 @@ impl<M: Manager + Send> PoolLock<M> {
     }
 
     // return the new pending + spawned counter
+    #[inline]
     pub(crate) fn incr_pending_count(&self) -> u8 {
         let mut lock = self.inner.lock().unwrap();
         lock.pending.push_back(Pending::new());
@@ -144,6 +147,7 @@ impl<M: Manager + Send> PoolLock<M> {
     }
 
     // return the new spawned value
+    #[inline]
     pub(crate) fn decr_spawn_count(&self) -> u8 {
         let mut lock = self.inner.lock().unwrap();
         if lock.spawned > 0 {
@@ -166,6 +170,7 @@ impl<M: Manager + Send> PoolLock<M> {
         }
     }
 
+    #[inline]
     pub(crate) fn pop_pending(&self) -> Option<Pending> {
         self.inner.lock().unwrap().pending.pop_front()
     }
@@ -177,12 +182,14 @@ impl<M: Manager + Send> PoolLock<M> {
         None
     }
 
+    #[inline]
     pub(crate) fn put_back(&self, conn: IdleConn<M>) {
         let mut inner = self.inner.lock().unwrap();
         inner.conn.push_back(conn);
         inner.wake_one();
     }
 
+    #[inline]
     pub(crate) fn put_back_incr_spawn_count(&self, conn: IdleConn<M>) {
         let mut inner = self.inner.lock().unwrap();
 

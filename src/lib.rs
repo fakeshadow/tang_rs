@@ -49,24 +49,34 @@
 //!    // wait a bit as the pool spawn connections asynchronously
 //!    tokio::timer::delay(std::time::Instant::now() + std::time::Duration::from_secs(1)).await;
 //!
+//!    // get a pool ref
+//!    let pool_ref = pool.get().await.expect("can't get pool ref");
+//!
+//!    // deref or derefmut to get connection.
+//!    let (client, statements) = &*pool_ref;
+//!
+//!    // statement index is the same as the input vector when building the pool.
+//!    let statement = statements.get(0).unwrap();
+//!    let rows = client.query(statement, &[]).await?;
+//!
+//!    // drop the pool ref to return connection to pool
+//!    drop(pool_ref);
+//!
 //!    // run the pool and use closure to query the pool.
-//!    let _row = pool
+//!    let _rows = pool
 //!        .run(|mut conn| Box::pin(  // pin the async function to make sure the &mut Conn outlives our closure.
 //!            async move {
 //!                let (client, statements) = &mut conn;
-//!
-//!                // statement index is the same as the input vector when building the pool.
 //!                let statement = statements.get(0).unwrap();
 //!
 //!                // it's possible to overwrite the source statements with new prepared ones.
 //!                // but be ware when a new connection spawn the associated statements will be the ones you passed in builder.
 //!
-//!                let ids = vec![1u32, 2, 3, 4, 5];
-//!                let row = client.query(statement, &[&ids]).try_collect::<Vec<tokio_postgres::Row>>().await?;
+//!                let rows = client.query(statement, &[]).await?;
 //!
 //!                // default error type.
 //!                // you can infer your own error type as long as it impl From trait for tang_rs::PostgresPoolError and tang_rs::RedisPoolError
-//!                Ok::<_, PostgresPoolError>(row)
+//!                Ok::<_, PostgresPoolError>(rows)
 //!             }
 //!        ))
 //!        .await

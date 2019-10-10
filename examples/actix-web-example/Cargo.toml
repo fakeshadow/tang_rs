@@ -33,7 +33,7 @@ git = "https://github.com/sfackler/rust-postgres"
 
 [dependencies.redis]
 git = "https://github.com/fakeshadow/redis-rs"
-branch = "std_future"
+branch = "async_await_api"
 
 [dependencies.tang-rs]
 path = "../../"

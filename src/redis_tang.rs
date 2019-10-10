@@ -33,12 +33,7 @@ impl Manager for RedisManager {
         &'a self,
         c: &'a mut Self::Connection,
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
-        Box::pin(
-            redis::cmd("PING")
-                .query_async(c.clone())
-                .err_into()
-                .map_ok(|(_, ())| ()),
-        )
+        Box::pin(redis::cmd("PING").query_async(c).err_into())
     }
 
     fn is_closed(&self, _conn: &mut Self::Connection) -> bool {

@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::{borrow::Cow, fmt, str::FromStr};
 
-use futures::{FutureExt, TryFutureExt, TryStreamExt};
+use futures::{FutureExt, TryFutureExt};
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
     types::Type,
@@ -92,11 +92,6 @@ where
                 for p in prepares.iter() {
                     let PreparedStatement(query, types) = p;
                     vec.push(c.prepare_typed(query, &types));
-                    //                    if types.len() > 0 {
-                    //                        vec.push(c.prepare_typed(query, &types));
-                    //                    } else {
-                    //                        vec.push(c.prepare_typed(query, &[]));
-                    //                    }
                 }
 
                 let vec = futures::future::join_all(vec).await;
@@ -114,19 +109,11 @@ where
         })
     }
 
-    /// pin and box simple_query so that we can only try once from the stream.
     fn is_valid<'a>(
         &'a self,
         c: &'a mut Self::Connection,
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
-        // ugly double box.
-        Box::pin(async move {
-            Box::pin(c.0.simple_query(""))
-                .try_next()
-                .map_ok(|_| ())
-                .err_into()
-                .await
-        })
+        Box::pin(c.0.simple_query("").map_ok(|_| ()).err_into())
     }
 
     fn is_closed(&self, conn: &mut Self::Connection) -> bool {

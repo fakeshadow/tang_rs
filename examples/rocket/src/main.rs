@@ -123,13 +123,11 @@ async fn index(
 
 #[get("/redis")]
 async fn index2(pool: State<'_, Pool<RedisManager>>) -> Result<String, Debug<std::io::Error>> {
-    let pool_ref = pool.get().await.map_err(MyError::from)?;
-    let client = &*pool_ref;
+    let mut pool_ref = pool.get().await.map_err(MyError::from)?;
+    let client = &mut *pool_ref;
 
-    // let's shadow name client var here. The connection will be pushed back to pool when pool_ref dropped.
-    // the client var we shadowed is from redis query return and last till the function end.
-    let (client, ()) = redis::cmd("PING")
-        .query_async(client.clone())
+    redis::cmd("PING")
+        .query_async::<_, ()>(client)
         .await
         .expect("Failed to query redis");
 
