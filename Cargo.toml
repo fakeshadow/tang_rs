@@ -35,6 +35,7 @@ optional = true
 [dependencies.futures-util-preview]
 version = "=0.3.0-alpha.19"
 default-features = false
+features = [ "std", "compat" ]
 
 [dependencies.mongodb]
 optional = true

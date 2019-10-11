@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::{borrow::Cow, fmt, str::FromStr};
+use std::{fmt, str::FromStr};
 
 use futures_util::{FutureExt, TryFutureExt};
 use tokio_postgres::{
@@ -18,7 +19,7 @@ where
 {
     config: Config,
     tls: Tls,
-    prepares: Vec<PreparedStatement>,
+    prepares: PreparedHashMap,
 }
 
 impl<Tls> PostgresManager<Tls>
@@ -27,44 +28,41 @@ where
 {
     /// Create a new `PostgresConnectionManager` with the specified `config`.
     /// prepared statements can be passed when connecting to speed up frequent used queries.
-    /// example:
-    /// ```rust
-    /// use tokio_postgres::types::Type;
-    /// use tang_rs::PostgresManager;
-    ///
-    /// let db_url = "postgres://postgres:123@localhost/test";
-    ///
-    /// let statements = vec![
-    ///     ("SELECT * from table WHERE id = $1", vec![Type::OID]),
-    ///     ("SELECT * from table2 WHERE id = $1", vec![]) // pass empty vec if you don't want a type specific prepare.
-    /// ];
-    ///
-    /// let mgr = PostgresManager::new_from_stringlike(db_url, statements, tokio_postgres::NoTls);
-    /// ```
-    pub fn new(
-        config: Config,
-        statements: Vec<(&str, Vec<Type>)>,
-        tls: Tls,
-    ) -> PostgresManager<Tls> {
+    pub fn new(config: Config, tls: Tls) -> PostgresManager<Tls> {
         PostgresManager {
             config,
             tls,
-            prepares: statements.into_iter().map(|p| p.into()).collect(),
+            prepares: HashMap::new(),
         }
     }
 
     /// Create a new `PostgresConnectionManager`, parsing the config from `params`.
-    pub fn new_from_stringlike<T>(
-        params: T,
-        statements: Vec<(&str, Vec<Type>)>,
-        tls: Tls,
-    ) -> Result<PostgresManager<Tls>, Error>
+    pub fn new_from_stringlike<T>(params: T, tls: Tls) -> Result<PostgresManager<Tls>, Error>
     where
         T: ToString,
     {
         let stringified_params = params.to_string();
         let config = Config::from_str(&stringified_params)?;
-        Ok(Self::new(config, statements, tls))
+        Ok(Self::new(config, tls))
+    }
+
+    /// example:
+    /// ```rust
+    /// use tokio_postgres::types::Type;
+    /// use tokio_postgres::NoTls;
+    /// use tang_rs::PostgresManager;
+    ///
+    /// let db_url = "postgres://postgres:123@localhost/test";
+    /// let mgr = PostgresManager::new_from_stringlike(db_url, NoTls)
+    ///     .expect("Can't make manager")
+    ///     .prepare_statement("get_table", "SELECT * from table", &[])
+    ///     .prepare_statement("get_table_by_id", "SELECT * from table where id=$1, key=$2", &[Type::OID, Type::VARCHAR]);
+    /// ```
+    /// alias is used to call specific statement when using the connection.
+    pub fn prepare_statement(mut self, alias: &str, statement: &str, types: &[Type]) -> Self {
+        self.prepares
+            .insert(alias.into(), (statement, types).into());
+        self
     }
 }
 
@@ -75,7 +73,7 @@ where
     Tls::TlsConnect: Send,
     <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
 {
-    type Connection = (Client, Vec<Statement>);
+    type Connection = (Client, HashMap<String, Statement>);
     type Error = PostgresPoolError;
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
@@ -84,28 +82,25 @@ where
             tokio_executor::spawn(conn.map(|_| ()));
 
             let prepares = &self.prepares;
+            let mut statements = HashMap::new();
+            let mut futures = Vec::with_capacity(prepares.len());
 
             // make prepared statements if there is any and set manager prepares for later use.
-            let sts = if !prepares.is_empty() {
-                let mut vec = Vec::with_capacity(prepares.len());
+            for p in prepares.iter() {
+                let (alias, PreparedStatement(query, types)) = p;
+                let alias = alias.to_string();
+                let future = c
+                    .prepare_typed(query, &types)
+                    .map_ok(|statement| (alias, statement));
+                futures.push(future);
+            }
 
-                for p in prepares.iter() {
-                    let PreparedStatement(query, types) = p;
-                    vec.push(c.prepare_typed(query, &types));
-                }
+            for result in futures_util::future::join_all(futures).await.into_iter() {
+                let (alias, statement) = result?;
+                statements.insert(alias, statement);
+            }
 
-                let vec = futures_util::future::join_all(vec).await;
-
-                let mut sts = Vec::with_capacity(vec.len());
-                for v in vec.into_iter() {
-                    sts.push(v?);
-                }
-                sts
-            } else {
-                vec![]
-            };
-
-            Ok((c, sts))
+            Ok((c, statements))
         })
     }
 
@@ -132,14 +127,17 @@ where
     }
 }
 
-/// wrapper type for prepared statement
+// type for prepared statement's hash map. key is used as statement's alias
+type PreparedHashMap = HashMap<String, PreparedStatement>;
+
+// wrapper type for prepared statement
 // ToDo: add runtime refresh of prepared statement
 #[derive(Clone)]
-pub struct PreparedStatement(Cow<'static, str>, Cow<'static, [Type]>);
+pub struct PreparedStatement(String, Vec<Type>);
 
-impl From<(&str, Vec<Type>)> for PreparedStatement {
-    fn from((st, typs): (&str, Vec<Type>)) -> Self {
-        PreparedStatement(Cow::Owned(st.into()), Cow::Owned(typs))
+impl From<(&str, &[Type])> for PreparedStatement {
+    fn from((st, typs): (&str, &[Type])) -> Self {
+        PreparedStatement(st.into(), typs.into())
     }
 }
 

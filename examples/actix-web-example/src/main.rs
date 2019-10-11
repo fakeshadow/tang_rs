@@ -7,7 +7,7 @@ use actix_web::{
     web::{self, Data},
     App, Error, HttpResponse, HttpServer,
 };
-use futures::{FutureExt, TryFutureExt};
+use futures_util::{FutureExt, TryFutureExt};
 use tokio_postgres::{types::Type, NoTls, Row};
 
 use std::future::Future;
@@ -19,19 +19,14 @@ use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
 async fn main() -> std::io::Result<()> {
     let db_url = "postgres://postgres:123@localhost/test";
 
-    // make prepared statements. pass Vec<tokio_postgres::types::Type> if you want typed statement. pass vec![] for no typed statement.
-    // pass vec![] if you don't want any prepared statements.
-    let statements = vec![
-        (
+    let mgr = PostgresManager::new_from_stringlike(db_url, NoTls)
+        .unwrap_or_else(|_| panic!("can't make postgres manager"))
+        .prepare_statement(
+            "get_topics",
             "SELECT * FROM topics WHERE id=ANY($1)",
-            vec![Type::OID_ARRAY],
-        ),
-        ("SELECT * FROM users WHERE id=ANY($1)", vec![]),
-    ];
-
-    // setup manager
-    let mgr = PostgresManager::new_from_stringlike(db_url, statements, NoTls)
-        .unwrap_or_else(|_| panic!("can't make postgres manager"));
+            &[Type::OID_ARRAY],
+        )
+        .prepare_statement("get_users", "SELECT * FROM posts WHERE id=ANY($1)", &[]);
 
     /*
         Limitation:
@@ -95,14 +90,14 @@ async fn test_async(pool: MyPool) -> Result<HttpResponse, Error> {
     let (client, statements) = &*pool_ref;
 
     let (t, u): (Vec<Topic>, Vec<u32>) = client
-        .query(statements.get(0).unwrap(), &[&ids])
+        .query(statements.get("get_topics").unwrap(), &[&ids])
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?
         .parse()
         .await;
 
     let _rows = client
-        .query(statements.get(1).unwrap(), &[&u])
+        .query(statements.get("get_users").unwrap(), &[&u])
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 

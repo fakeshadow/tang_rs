@@ -32,19 +32,17 @@ fn main() {
 
     let db_url = "postgres://postgres:123@localhost/test";
 
-    // make prepared statements. pass Vec<tokio_postgres::types::Type> if you want typed statement. pass vec![] for no typed statement.
-    // pass vec![] if you don't want any prepared statements.
-    let statements = vec![
-        (
-            "SELECT * FROM topics WHERE id=ANY($1)",
-            vec![Type::OID_ARRAY],
-        ),
-        ("SELECT * FROM users WHERE id=ANY($1)", vec![]),
-    ];
-
     // setup manager
-    let mgr = PostgresManager::new_from_stringlike(db_url, statements, tokio_postgres::NoTls)
-        .unwrap_or_else(|_| panic!("can't make postgres manager"));
+    let mgr = PostgresManager::new_from_stringlike(db_url, tokio_postgres::NoTls)
+        .unwrap_or_else(|_| panic!("can't make postgres manager"))
+        // alias is used to call according statement later.
+        // pass &[tokio_postgres::types::Type] if you want typed statement. pass &[] for no typed statement.
+        .prepare_statement(
+            "get_topics",
+            "SELECT * FROM topics WHERE id=ANY($1)",
+            &[Type::OID_ARRAY],
+        )
+        .prepare_statement("get_users", "SELECT * FROM users WHERE id=ANY($1)", &[]);
 
     // build postgres pool
     let pool = runtime
@@ -102,17 +100,18 @@ async fn index(
     // pool.get return the Conn and a reference of pool so that we can use the connection outside a closure.
     let pool_ref = pool.get().await.map_err(MyError::from)?;
 
+    // deref or deref mut to get connection from pool_ref.
     let (client, statements) = &*pool_ref;
 
     let (t, u) = client
-        .query(statements.get(0).unwrap(), &[&IDS])
+        .query(statements.get("get_topics").unwrap(), &[&IDS])
         .await
         .expect("Failed to query postgres")
         .parse()
         .await;
 
     let _rows = client
-        .query(statements.get(1).unwrap(), &[&u])
+        .query(statements.get("get_users").unwrap(), &[&u])
         .await
         .expect("Failed to query postgres");
 

@@ -1,3 +1,13 @@
+(October 11, 2019)
+----------------------
+
+### Breaking
+- `PostgresManager` use `prepare_statement` method to accept prepared statement when building manager.
+- `PoolRef` gives a `HashMap<String, Statement>` instead of `Vec<Statement>`. 
+- examples have been updated according to these changes.
+
+<br>
+
 (October 3, 2019)
 ----------------------
 

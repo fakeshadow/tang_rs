@@ -19,9 +19,8 @@ default-features = false
 [dependencies.serde_derive]
 version = "1.0.101"
 
-[dependencies.futures-preview]
+[dependencies.futures-util-preview]
 version = "=0.3.0-alpha.19"
-features = [ "async-await" ]
 
 [dependencies.tokio]
 version = "=0.2.0-alpha.6"

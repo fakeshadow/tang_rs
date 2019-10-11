@@ -18,21 +18,22 @@
 //!
 //!#[tokio::main]
 //!async fn main() -> std::io::Result<()> {
-//! let db_url = "postgres://postgres:123@localhost/test";
-//!    // make prepared statements. pass Vec<tokio_postgres::types::Type> if you want typed statement. pass vec![] for no typed statement.
-//!    // pass vec![] if you don't need any prepared statements.
-//!    let statements = vec![
-//!            ("SELECT * FROM topics WHERE id=ANY($1)", vec![tokio_postgres::types::Type::OID_ARRAY]),
-//!            ("SELECT * FROM posts WHERE id=ANY($1)", vec![])
-//!        ];
+//!    let db_url = "postgres://postgres:123@localhost/test";
 //!
 //!    // setup manager
 //!    let mgr =
 //!        PostgresManager::new_from_stringlike(
 //!            db_url,
-//!            statements,
 //!            tokio_postgres::NoTls,
 //!        ).unwrap_or_else(|_| panic!("can't make postgres manager"));
+//!
+//!    //make prepared statements to speed up frequent used queries. It just stores your statement info in a hash map and
+//!    //you can skip this step if you don't need any prepared statement.
+//!    let mgr = mgr
+//!        // alias is used to call according statement later.
+//!        // pass &[tokio_postgres::types::Type] if you want typed statement. pass &[] for no typed statement.
+//!        .prepare_statement("get_topics", "SELECT * FROM topics WHERE id=ANY($1)", &[tokio_postgres::types::Type::OID_ARRAY])
+//!        .prepare_statement("get_users", "SELECT * FROM posts WHERE id=ANY($1)", &[]);
 //!
 //!    // make pool
 //!    let pool = Builder::new()
@@ -55,8 +56,8 @@
 //!    // deref or derefmut to get connection.
 //!    let (client, statements) = &*pool_ref;
 //!
-//!    // statement index is the same as the input vector when building the pool.
-//!    let statement = statements.get(0).unwrap();
+//!    // use the alias input when building manager to get specific statement.
+//!    let statement = statements.get("get_topics").unwrap();
 //!    let rows = client.query(statement, &[]).await?;
 //!
 //!    // drop the pool ref to return connection to pool
@@ -67,9 +68,10 @@
 //!        .run(|mut conn| Box::pin(  // pin the async function to make sure the &mut Conn outlives our closure.
 //!            async move {
 //!                let (client, statements) = &mut conn;
-//!                let statement = statements.get(0).unwrap();
+//!                let statement = statements.get("get_topics").unwrap();
 //!
-//!                // it's possible to overwrite the source statements with new prepared ones.
+//!                // It's possible to overwrite the source statements with new prepared ones.
+//!                // It's just a hash map with a String as key and statement as value.
 //!                // but be ware when a new connection spawn the associated statements will be the ones you passed in builder.
 //!
 //!                let rows = client.query(statement, &[]).await?;

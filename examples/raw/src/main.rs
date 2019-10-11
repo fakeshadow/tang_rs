@@ -1,22 +1,21 @@
 use tang_rs::{Builder, PostgresManager, PostgresPoolError, RedisManager};
+use tokio_postgres::types::Type;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let db_url = "postgres://postgres:123@localhost/test";
 
-    // make prepared statements. pass Vec<tokio_postgres::types::Type> if you want typed statement. pass vec![] for no typed statement.
-    // pass vec![] if you don't want any prepared statements.
-    let statements = vec![
-        (
-            "SELECT * FROM topics WHERE id=ANY($1)",
-            vec![tokio_postgres::types::Type::OID_ARRAY],
-        ),
-        ("SELECT * FROM posts WHERE id=ANY($1)", vec![]),
-    ];
-
     // setup manager
-    let mgr = PostgresManager::new_from_stringlike(db_url, statements, tokio_postgres::NoTls)
+    let mgr = PostgresManager::new_from_stringlike(db_url, tokio_postgres::NoTls)
         .unwrap_or_else(|_| panic!("can't make postgres manager"));
+
+    // make prepared statements to speed up frequent used queries. It just stores your statement info in a hash map and
+    // you can skip this step if you don't need any prepared statement.
+    let mgr = mgr
+        // alias is used to call according statement later.
+        // pass &[tokio_postgres::types::Type] if you want typed statement. pass &[] for no typed statement.
+        .prepare_statement("topics", "SELECT * FROM topics WHERE id=ANY($1)", &[Type::OID_ARRAY])
+        .prepare_statement("users", "SELECT * FROM posts WHERE id=ANY($1)", &[]);
 
     // make pool
     let pool = Builder::new()
@@ -41,15 +40,17 @@ async fn main() -> std::io::Result<()> {
                 async move {
                     let (client, statements) = &conn;
 
-                    // statement index is the same as the input vector when building the pool.
-                    let statement = statements.get(0).unwrap();
+                    // use statement alias to call specific prepared statement.
+                    let statement = statements.get("topics").expect(
+                        "handle the option if you are not sure if a prepared statement exists",
+                    );
 
                     let ids = vec![1u32, 2, 3, 4, 5];
 
                     let rows = client.query(statement, &[&ids]).await?;
 
                     Ok::<_, PostgresPoolError>(rows)
-                    // infer type here so that u can use your custom error in the closure. you error type have to impl From<PostgresPoolError> or From<RedisPoolError>.
+                    // infer type here so that u can use your custom error in the closure. you error type have to impl From<PostgresPoolError>.
                 },
             )
         })
@@ -68,12 +69,29 @@ async fn main() -> std::io::Result<()> {
     let mut pool_ref = pool
         .get()
         .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "place holder error"))?;
+        .expect("Failed to get pool ref");
 
     // use deref or deref mut to get our client from pool_ref
-    let (client, statements) = &*pool_ref;
+    let (client, statements) = &mut *pool_ref;
 
-    let statement = statements.get(0).unwrap();
+    /*
+        It's possible to insert new statement into statements from pool_ref.
+        But be ware the statement will only work on this specific connection and not other connections in the pool.
+        The additional statement will also be dropped when the connection is dropped from pool.
+        A newly spawned connection will also not include this additional statement.
+
+        * This newly inserted statement most likely can't take advantage of the pipeline query features also
+        as we didn't join futures when prepare this statement.
+
+        It's suggested that if you want pipelined statements you should join the futures of prepare before calling await on them.
+    */
+    let statement_new = client
+        .prepare_typed("SELECT * FROM topics WHERE id=ANY($1)", &[])
+        .await
+        .expect("Failed to prepare statement");
+    statements.insert("new_statement_alias".into(), statement_new);
+
+    let statement = statements.get("new_statement_alias").unwrap();
 
     let ids = vec![1u32, 2, 3, 4, 5];
 
