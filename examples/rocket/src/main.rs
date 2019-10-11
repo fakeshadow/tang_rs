@@ -51,9 +51,9 @@ fn main() {
         .block_on(
             Builder::new()
                 .always_check(false)
-                .idle_timeout(Some(std::time::Duration::from_secs(10)))
-                .max_lifetime(Some(std::time::Duration::from_secs(20)))
-                .reaper_rate(std::time::Duration::from_secs(10))
+                .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
+                .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+                .reaper_rate(std::time::Duration::from_secs(15))
                 .min_idle(6)
                 .max_size(24)
                 .build(mgr),
@@ -67,8 +67,8 @@ fn main() {
         .block_on(
             Builder::new()
                 .always_check(false)
-                .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
-                .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+                .idle_timeout(Some(std::time::Duration::from_secs(10)))
+                .max_lifetime(Some(std::time::Duration::from_secs(30)))
                 .reaper_rate(std::time::Duration::from_secs(15))
                 .min_idle(1)
                 .max_size(24)

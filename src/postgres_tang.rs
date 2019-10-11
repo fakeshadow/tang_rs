@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::{borrow::Cow, fmt, str::FromStr};
 
-use futures::{FutureExt, TryFutureExt};
+use futures_util::{FutureExt, TryFutureExt};
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
     types::Type,
@@ -94,7 +94,7 @@ where
                     vec.push(c.prepare_typed(query, &types));
                 }
 
-                let vec = futures::future::join_all(vec).await;
+                let vec = futures_util::future::join_all(vec).await;
 
                 let mut sts = Vec::with_capacity(vec.len());
                 for v in vec.into_iter() {

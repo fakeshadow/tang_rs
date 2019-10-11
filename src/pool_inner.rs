@@ -7,7 +7,6 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use slab::Slab;
-use tokio_executor::TypedExecutor;
 
 use crate::{manager::Manager, IdleConn, SharedPool};
 
@@ -26,12 +25,7 @@ impl Pending {
     }
 
     pub(crate) fn should_remove(&self, connection_timeout: Duration) -> bool {
-        let now = Instant::now();
-        if now > (self.start_from + connection_timeout * 6) {
-            true
-        } else {
-            false
-        }
+        Instant::now() > (self.start_from + connection_timeout * 6)
     }
 }
 
@@ -55,7 +49,6 @@ impl HelperQueue {
         if self.last_key == wait_key {
             return;
         }
-
         if !self.queue.contains(&wait_key) {
             self.last_key = wait_key;
             self.queue.push_back(wait_key);
@@ -73,7 +66,6 @@ impl HelperQueue {
 }
 
 // PoolInner holds all the IdleConn and the waiters waiting for a connection.
-// When we have a `Pending` for too long we know it's gone bad and it's safe to remove.
 /// PoolInner is basically a reimplementation of `async_std::sync::Mutex`.
 pub(crate) struct PoolInner<M: Manager + Send> {
     spawned: u8,
@@ -119,23 +111,21 @@ impl<M: Manager + Send> PoolLock<M> {
         }
     }
 
-    pub(crate) fn state(&self) -> State {
-        let inner = self.inner.lock().unwrap();
-        State {
-            connections: inner.spawned,
-            idle_connections: inner.conn.len() as u8,
-            pending_connections: inner.pending.iter().cloned().collect(),
-        }
-    }
-
     #[inline]
     pub(crate) fn lock<'a>(&'a self, shared_pool: &'a Arc<SharedPool<M>>) -> PoolLockFuture<'a, M> {
         PoolLockFuture {
             shared_pool,
-            pool: self,
+            pool_lock: self,
             wait_key: None,
             acquired: false,
         }
+    }
+
+    fn try_pop_conn(&self) -> Option<IdleConn<M>> {
+        self.inner
+            .try_lock()
+            .ok()
+            .and_then(|mut inner| inner.conn.pop_front())
     }
 
     // return the new pending + spawned counter
@@ -150,36 +140,45 @@ impl<M: Manager + Send> PoolLock<M> {
     #[inline]
     pub(crate) fn decr_spawn_count(&self) -> u8 {
         let mut lock = self.inner.lock().unwrap();
-        if lock.spawned > 0 {
+        if lock.spawned != 0 {
             lock.spawned -= 1;
         }
-
         lock.spawned
     }
 
-    // remove pending that last too long.
-    pub(crate) fn try_peek_pending<F>(&self, should_remove: F)
+    // drop pending that last too long.
+    #[inline]
+    pub(crate) fn drop_pending<F>(&self, should_drop: F)
     where
-        F: FnOnce(Option<&Pending>) -> bool,
+        F: FnOnce(&Pending) -> bool,
     {
-        if let Ok(mut inner) = self.inner.try_lock() {
-            let pending = inner.pending.front();
-            if should_remove(pending) {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(pending) = inner.pending.front() {
+            if should_drop(pending) {
                 inner.pending.pop_front();
             }
         }
     }
 
-    #[inline]
-    pub(crate) fn pop_pending(&self) -> Option<Pending> {
-        self.inner.lock().unwrap().pending.pop_front()
-    }
-
-    pub(crate) fn try_pop_conn(&self) -> Option<IdleConn<M>> {
-        if let Ok(mut inner) = self.inner.try_lock() {
-            return inner.conn.pop_front();
-        }
-        None
+    // return spawned count as Some(u8) if we got the lock successfully.
+    pub(crate) fn try_drop_conns<F>(&self, mut should_drop: F) -> Option<u8>
+    where
+        F: FnMut(&IdleConn<M>) -> bool,
+    {
+        self.inner.try_lock().ok().and_then(|mut inner| {
+            let len = inner.conn.len();
+            for index in 0..len {
+                if let Some(conn) = inner.conn.get(index) {
+                    if should_drop(conn) {
+                        inner.conn.remove(index);
+                        if inner.spawned != 0 {
+                            inner.spawned -= 1;
+                        }
+                    }
+                }
+            }
+            Some(inner.spawned)
+        })
     }
 
     #[inline]
@@ -192,13 +191,20 @@ impl<M: Manager + Send> PoolLock<M> {
     #[inline]
     pub(crate) fn put_back_incr_spawn_count(&self, conn: IdleConn<M>) {
         let mut inner = self.inner.lock().unwrap();
-
         inner.pending.pop_front();
-
         if (inner.spawned as usize) < inner.conn.capacity() {
             inner.conn.push_back(conn);
             inner.spawned += 1;
-            inner.wake_one();
+        }
+        inner.wake_one();
+    }
+
+    pub(crate) fn state(&self) -> State {
+        let inner = self.inner.lock().unwrap();
+        State {
+            connections: inner.spawned,
+            idle_connections: inner.conn.len() as u8,
+            pending_connections: inner.pending.iter().cloned().collect(),
         }
     }
 }
@@ -207,7 +213,7 @@ impl<M: Manager + Send> PoolLock<M> {
 // Then when a `IdleConn` is returned to pool we lock the `PoolLock` and wake the `Wakers` inside it to notify other `PoolLockFuture` it's time to continue.
 pub(crate) struct PoolLockFuture<'a, M: Manager + Send> {
     shared_pool: &'a Arc<SharedPool<M>>,
-    pool: &'a PoolLock<M>,
+    pool_lock: &'a PoolLock<M>,
     wait_key: Option<usize>,
     acquired: bool,
 }
@@ -216,7 +222,7 @@ impl<M: Manager + Send> Drop for PoolLockFuture<'_, M> {
     #[inline]
     fn drop(&mut self) {
         if let Some(wait_key) = self.wait_key {
-            let mut inner = self.pool.inner.lock().unwrap();
+            let mut inner = self.pool_lock.inner.lock().unwrap();
             let wait_key = inner.waiters.remove(wait_key);
 
             if wait_key.is_none() && !self.acquired {
@@ -231,30 +237,32 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
     type Output = IdleConn<M>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let pool = self.pool;
+        let pool_lock = self.pool_lock;
 
         // if we get a connection we return directly
-        if let Ok(mut inner) = pool.inner.try_lock() {
-            if let Some(conn) = inner.conn.pop_front() {
-                self.acquired = true;
-                return Poll::Ready(conn);
-            }
+        if let Some(conn) = pool_lock.try_pop_conn() {
+            self.acquired = true;
+            return Poll::Ready(conn);
         }
 
         {
-            let mut inner = pool.inner.lock().unwrap();
+            let mut inner = pool_lock.inner.lock().unwrap();
 
             // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
-            if (inner.spawned + inner.pending.len() as u8) < self.shared_pool.statics.max_size {
-                inner.pending.push_back(Pending::new());
-
-                let shared_pool = self.shared_pool.clone();
-                let _ = tokio_executor::DefaultExecutor::current()
-                    .spawn(Box::pin(async move {
-                        let _ = shared_pool.add_connection().await;
-                    }))
-                    .map_err(|_| inner.pending.pop_front());
+            #[cfg(not(feature = "actix-web"))]
+            {
+                if (inner.spawned + inner.pending.len() as u8) < self.shared_pool.statics.max_size {
+                    inner.pending.push_back(Pending::new());
+                    let shared_clone = self.shared_pool.clone();
+                    let _ = self
+                        .shared_pool
+                        .spawn(async move { shared_clone.add_connection().await })
+                        .map_err(|_| inner.pending.pop_front());
+                }
             }
+
+            #[cfg(feature = "actix-web")]
+            let _clippy_ignore = self.shared_pool;
 
             // Either insert our waker if we don't have a wait key yet or register a new one if we already have a wait key.
             match self.wait_key {
@@ -280,11 +288,9 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
 
         // double check to make sure if we can get a connection.
         // If we can then we just undone the previous steps and return with our connection.
-        if let Ok(mut inner) = pool.inner.try_lock() {
-            if let Some(conn) = inner.conn.pop_front() {
-                self.acquired = true;
-                return Poll::Ready(conn);
-            }
+        if let Some(conn) = pool_lock.try_pop_conn() {
+            self.acquired = true;
+            return Poll::Ready(conn);
         }
 
         Poll::Pending

@@ -32,9 +32,9 @@ members = [
 version = "0.2.5"
 optional = true
 
-[dependencies.futures-preview]
+[dependencies.futures-util-preview]
 version = "=0.3.0-alpha.19"
-features = [ "compat", "async-await" ]
+default-features = false
 
 [dependencies.mongodb]
 optional = true

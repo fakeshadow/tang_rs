@@ -95,8 +95,7 @@ impl Builder {
     ///
     /// The connection that are idle and live beyond the time gate will be dropped.
     ///
-    /// Default 15 seconds and only one connection will be checked in each interval.
-    /// (no guarantee as we don't force lock the pool.)
+    /// Default 15 seconds.(no guarantee as we don't force lock the pool)
     pub fn reaper_rate(mut self, reaper_rate: Duration) -> Builder {
         self.reaper_rate = reaper_rate;
         self

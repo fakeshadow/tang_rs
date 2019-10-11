@@ -30,12 +30,11 @@ async fn main() -> std::io::Result<()> {
     ];
 
     // setup manager
-    // only support NoTls for now
     let mgr = PostgresManager::new_from_stringlike(db_url, statements, NoTls)
         .unwrap_or_else(|_| panic!("can't make postgres manager"));
 
     /*
-        limitation:
+        Limitation:
 
         actix-web still runs on tokio 0.1 under the hood. so spawning new connection won't work.
         so it best to set idle_timeout and max_lifetime both to None.
@@ -59,8 +58,8 @@ async fn main() -> std::io::Result<()> {
         .always_check(false)
         .idle_timeout(None)
         .max_lifetime(None)
-        .min_idle(24) // too many redis connection is not a good thing and could have negative impact on performance.
-        .max_size(24) // so one connection for one worker is more than enough.
+        .min_idle(24)
+        .max_size(24)
         .build(mgr)
         .await
         .unwrap_or_else(|_| panic!("can't make redis pool"));
@@ -77,13 +76,13 @@ async fn main() -> std::io::Result<()> {
     .run()
 }
 
-fn test(
-    pool: Data<Pool<PostgresManager<NoTls>>>,
-) -> impl Future01<Item = HttpResponse, Error = Error> {
+type MyPool = Data<Pool<PostgresManager<NoTls>>>;
+
+fn test(pool: MyPool) -> impl Future01<Item = HttpResponse, Error = Error> {
     test_async(pool).boxed_local().compat()
 }
 
-async fn test_async(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResponse, Error> {
+async fn test_async(pool: MyPool) -> Result<HttpResponse, Error> {
     let ids = vec![
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];
@@ -112,11 +111,13 @@ async fn test_async(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResp
     Ok(HttpResponse::Ok().json(&t))
 }
 
-fn test_redis(pool: Data<Pool<RedisManager>>) -> impl Future01<Item = HttpResponse, Error = Error> {
+type MyRedisPool = Data<Pool<RedisManager>>;
+
+fn test_redis(pool: MyRedisPool) -> impl Future01<Item = HttpResponse, Error = Error> {
     test_redisasync(pool).boxed_local().compat()
 }
 
-async fn test_redisasync(pool: Data<Pool<RedisManager>>) -> Result<HttpResponse, Error> {
+async fn test_redisasync(pool: MyRedisPool) -> Result<HttpResponse, Error> {
     let mut pool_ref = pool
         .get()
         .await

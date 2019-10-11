@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use futures::TryFutureExt;
+use futures_util::TryFutureExt;
 use redis::{aio::SharedConnection, Client, IntoConnectionInfo, RedisError};
 
 use crate::manager::{Manager, ManagerFuture};
