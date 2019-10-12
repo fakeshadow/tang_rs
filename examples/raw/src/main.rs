@@ -14,7 +14,11 @@ async fn main() -> std::io::Result<()> {
     let mgr = mgr
         // alias is used to call according statement later.
         // pass &[tokio_postgres::types::Type] if you want typed statement. pass &[] for no typed statement.
-        .prepare_statement("topics", "SELECT * FROM topics WHERE id=ANY($1)", &[Type::OID_ARRAY])
+        .prepare_statement(
+            "topics",
+            "SELECT * FROM topics WHERE id=ANY($1)",
+            &[Type::OID_ARRAY],
+        )
         .prepare_statement("users", "SELECT * FROM posts WHERE id=ANY($1)", &[]);
 
     // make pool
@@ -66,10 +70,7 @@ async fn main() -> std::io::Result<()> {
         })?;
 
     // get pool reference and run it outside of a closure
-    let mut pool_ref = pool
-        .get()
-        .await
-        .expect("Failed to get pool ref");
+    let mut pool_ref = pool.get().await.expect("Failed to get pool ref");
 
     // use deref or deref mut to get our client from pool_ref
     let (client, statements) = &mut *pool_ref;

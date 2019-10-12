@@ -6,11 +6,7 @@ extern crate rocket;
 extern crate serde_derive;
 
 use std::convert::From;
-use std::future::Future;
-use std::pin::Pin;
 
-use futures::task::Context;
-use futures::Poll;
 use rocket::{
     config::{Config, Environment},
     response::{content, Debug},
@@ -19,6 +15,8 @@ use rocket::{
 use tokio::runtime::Runtime;
 use tokio_postgres::{types::Type, Row};
 
+use futures::TryStreamExt;
+use postgres_types::ToSql;
 use tang_rs::{Builder, Pool, PostgresManager, PostgresPoolError, RedisManager, RedisPoolError};
 
 // dummy data
@@ -103,15 +101,36 @@ async fn index(
     // deref or deref mut to get connection from pool_ref.
     let (client, statements) = &*pool_ref;
 
+    let st = client
+        .prepare_typed("SELECT * FROM topics WHERE id=ANY($1)", &[Type::OID_ARRAY])
+        .await
+        .expect("Failed to prepare");
+
     let (t, u) = client
-        .query(statements.get("get_topics").unwrap(), &[&IDS])
+        .query_raw(&st, [&IDS as &(dyn ToSql + Sync)].iter().map(|s| *s as _))
         .await
         .expect("Failed to query postgres")
-        .parse()
-        .await;
+        .try_fold(
+            (Vec::with_capacity(20), Vec::with_capacity(20)),
+            |(mut t, mut u), r: Row| {
+                let uid: u32 = r.get(1);
+                if !u.contains(&uid) {
+                    u.push(uid);
+                }
+                t.push(Topic {
+                    id: r.get(0),
+                    user_id: r.get(1),
+                    category_id: r.get(2),
+                    title: r.get(3),
+                    body: r.get(4),
+                    thumbnail: r.get(5),
+                    is_locked: r.get(8),
+                    is_visible: r.get(9),
+                });
 
-    let _rows = client
-        .query(statements.get("get_users").unwrap(), &[&u])
+                futures::future::ok((t, u))
+            },
+        )
         .await
         .expect("Failed to query postgres");
 
@@ -160,48 +179,6 @@ impl From<RedisPoolError> for MyError {
 impl From<MyError> for Debug<std::io::Error> {
     fn from(_m: MyError) -> Debug<std::io::Error> {
         Debug(std::io::Error::new(std::io::ErrorKind::TimedOut, "oh no!"))
-    }
-}
-
-struct ParseRow<'a> {
-    rows: &'a [Row],
-}
-
-trait ParseRowTrait {
-    fn parse(&self) -> ParseRow<'_>;
-}
-
-impl ParseRowTrait for Vec<Row> {
-    fn parse(&self) -> ParseRow<'_> {
-        ParseRow { rows: &self }
-    }
-}
-
-impl Future for ParseRow<'_> {
-    type Output = (Vec<Topic>, Vec<u32>);
-
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut t: Vec<Topic> = Vec::with_capacity(20);
-        let mut u = Vec::with_capacity(20);
-
-        for r in self.rows.iter() {
-            let uid: u32 = r.get(1);
-            if !u.contains(&uid) {
-                u.push(uid);
-            }
-            t.push(Topic {
-                id: r.get(0),
-                user_id: r.get(1),
-                category_id: r.get(2),
-                title: r.get(3),
-                body: r.get(4),
-                thumbnail: r.get(5),
-                is_locked: r.get(8),
-                is_visible: r.get(9),
-            });
-        }
-
-        Poll::Ready((t, u))
     }
 }
 

@@ -1,3 +1,4 @@
+use slab::Slab;
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
@@ -6,11 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use slab::Slab;
-
 use crate::{manager::Manager, IdleConn, SharedPool};
-
-const WAIT_KEY_NONE: usize = std::usize::MAX;
 
 #[derive(Debug, Clone)]
 pub struct Pending {
@@ -32,32 +29,19 @@ impl Pending {
 // temporary waiters helper queue to deal with Slab's unfair insert.
 struct HelperQueue {
     queue: VecDeque<usize>,
-    last_key: usize,
 }
 
 impl Default for HelperQueue {
     fn default() -> Self {
         HelperQueue {
             queue: VecDeque::with_capacity(128 * 128),
-            last_key: WAIT_KEY_NONE,
         }
     }
 }
 
 impl HelperQueue {
     fn insert(&mut self, wait_key: usize) {
-        if self.last_key == wait_key {
-            return;
-        }
-        if !self.queue.contains(&wait_key) {
-            self.last_key = wait_key;
-            self.queue.push_back(wait_key);
-        }
-    }
-
-    fn insert_no_check(&mut self, wait_key: usize) {
         self.queue.push_back(wait_key);
-        self.last_key = wait_key;
     }
 
     fn get(&mut self) -> Option<usize> {
@@ -76,21 +60,19 @@ pub(crate) struct PoolInner<M: Manager + Send> {
 }
 
 impl<M: Manager + Send> PoolInner<M> {
-    fn wake_one(&mut self) {
+    fn get_waker(&mut self) -> Option<Waker> {
         if let Some(waiter_key) = self.waiters_queue.get() {
             if let Some(waker) = self.waiters.get_mut(waiter_key) {
                 if let Some(waker) = waker.take() {
-                    waker.wake();
-                    return;
+                    return Some(waker);
                 }
             }
         }
 
         if let Some((_i, waker)) = self.waiters.iter_mut().next() {
-            if let Some(waker) = waker.take() {
-                waker.wake();
-            }
+            return waker.take();
         }
+        None
     }
 }
 
@@ -185,7 +167,11 @@ impl<M: Manager + Send> PoolLock<M> {
     pub(crate) fn put_back(&self, conn: IdleConn<M>) {
         let mut inner = self.inner.lock().unwrap();
         inner.conn.push_back(conn);
-        inner.wake_one();
+        let waker = inner.get_waker();
+        drop(inner);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
 
     #[inline]
@@ -196,7 +182,11 @@ impl<M: Manager + Send> PoolLock<M> {
             inner.conn.push_back(conn);
             inner.spawned += 1;
         }
-        inner.wake_one();
+        let waker = inner.get_waker();
+        drop(inner);
+        if let Some(waker) = waker {
+            waker.wake();
+        }
     }
 
     pub(crate) fn state(&self) -> State {
@@ -227,7 +217,11 @@ impl<M: Manager + Send> Drop for PoolLockFuture<'_, M> {
 
             if wait_key.is_none() && !self.acquired {
                 // We were awoken but didn't acquire the lock. Wake up another task.
-                inner.wake_one();
+                let waker = inner.get_waker();
+                drop(inner);
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
             }
         }
     }
@@ -272,7 +266,6 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
                     if inner.waiters[wait_key].is_none() {
                         let waker = cx.waker().clone();
                         inner.waiters[wait_key] = Some(waker);
-                        // then we insert our wait key to queue with some fairness check.
                         inner.waiters_queue.insert(wait_key);
                     }
                 }
@@ -280,8 +273,7 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
                     let waker = cx.waker().clone();
                     let wait_key = inner.waiters.insert(Some(waker));
                     self.wait_key = Some(wait_key);
-                    // then we insert our wait key to queue.
-                    inner.waiters_queue.insert_no_check(wait_key);
+                    inner.waiters_queue.insert(wait_key);
                 }
             }
         }
