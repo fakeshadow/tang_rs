@@ -130,11 +130,12 @@ impl Builder {
             "min_idle must be no larger than max_size"
         );
 
+        let min_idle = self.min_idle;
         let pool = Pool::new(self, manager);
         #[cfg(feature = "default")]
-        pool.0.replenish_idle_connections().await??;
+        pool.0.replenish_idle_connections(min_idle).await?;
         #[cfg(feature = "actix-web")]
-        pool.0.replenish_idle_connections_temp().await?;
+        pool.0.replenish_idle_connections_temp(min_idle).await?;
 
         Ok(pool)
     }

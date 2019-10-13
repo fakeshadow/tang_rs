@@ -82,19 +82,19 @@ async fn test_async(pool: MyPool) -> Result<HttpResponse, Error> {
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];
 
-    let pool_ref = (*pool)
+    let pool_ref = pool
         .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 
-    let (client, statements) = &*pool_ref;
+    let (client, _statements) = &*pool_ref;
 
     let st = client
         .prepare_typed("SELECT * FROM topics WHERE id=ANY($1)", &[Type::OID_ARRAY])
         .await
         .expect("Failed to prepare");
 
-    let (t, u) = client
+    let (t, _u) = client
         .query_raw(
             &st,
             [&ids as &(dyn ToSql + Sync)]

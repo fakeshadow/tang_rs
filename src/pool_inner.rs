@@ -1,4 +1,3 @@
-use slab::Slab;
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
@@ -6,6 +5,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
+
+use slab::Slab;
 
 use crate::{manager::Manager, IdleConn, SharedPool};
 
@@ -63,9 +64,7 @@ impl<M: Manager + Send> PoolInner<M> {
     fn get_waker(&mut self) -> Option<Waker> {
         if let Some(waiter_key) = self.waiters_queue.get() {
             if let Some(waker) = self.waiters.get_mut(waiter_key) {
-                if let Some(waker) = waker.take() {
-                    return Some(waker);
-                }
+                return waker.take();
             }
         }
 
@@ -110,22 +109,26 @@ impl<M: Manager + Send> PoolLock<M> {
             .and_then(|mut inner| inner.conn.pop_front())
     }
 
-    // return the new pending + spawned counter
+    // add pending directly to pool inner if we try to spawn new connections.
+    // and return the new pending count as option to notify the Pool to replenish connections
+    // we use closure here as it's not need to try spawn new connections every time we decr spawn count
+    // (like decr spawn count when a connection doesn't return to pool successfully)
     #[inline]
-    pub(crate) fn incr_pending_count(&self) -> u8 {
-        let mut lock = self.inner.lock().unwrap();
-        lock.pending.push_back(Pending::new());
-        lock.pending.len() as u8 + lock.spawned
-    }
-
-    // return the new spawned value
-    #[inline]
-    pub(crate) fn decr_spawn_count(&self) -> u8 {
-        let mut lock = self.inner.lock().unwrap();
-        if lock.spawned != 0 {
-            lock.spawned -= 1;
+    pub(crate) fn decr_spawned_count<F>(&self, try_spawn: F) -> Option<u8>
+    where
+        F: FnOnce(u8) -> Option<u8>,
+    {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.spawned != 0 {
+            inner.spawned -= 1;
         }
-        lock.spawned
+
+        try_spawn(inner.spawned + inner.pending.len() as u8).map(|pending_new| {
+            for _i in 0..pending_new {
+                inner.pending.push_back(Pending::new());
+            }
+            pending_new
+        })
     }
 
     // drop pending that last too long.
@@ -142,8 +145,8 @@ impl<M: Manager + Send> PoolLock<M> {
         }
     }
 
-    // return spawned count as Some(u8) if we got the lock successfully.
-    pub(crate) fn try_drop_conns<F>(&self, mut should_drop: F) -> Option<u8>
+    // return new pending count as Some(u8).
+    pub(crate) fn try_drop_conns<F>(&self, min_idle: u8, mut should_drop: F) -> Option<u8>
     where
         F: FnMut(&IdleConn<M>) -> bool,
     {
@@ -159,7 +162,18 @@ impl<M: Manager + Send> PoolLock<M> {
                     }
                 }
             }
-            Some(inner.spawned)
+
+            let total_now = inner.spawned + inner.pending.len() as u8;
+            if total_now < min_idle {
+                let pending_new = min_idle - total_now;
+                for _i in 0..pending_new {
+                    inner.pending.push_back(Pending::new())
+                }
+
+                Some(pending_new)
+            } else {
+                None
+            }
         })
     }
 

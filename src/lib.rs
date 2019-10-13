@@ -101,14 +101,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures_util::FutureExt;
+use tokio_executor::{DefaultExecutor, Executor};
 use tokio_timer::Interval;
-#[cfg(feature = "actix-web")]
-use {
-    futures_util::{compat::Future01CompatExt, FutureExt, TryFutureExt},
-    tokio_timer01::Timeout,
-};
 #[cfg(not(feature = "actix-web"))]
-use {tokio_executor::Executor, tokio_timer::Timeout};
+use tokio_timer::Timeout;
 
 pub use builder::Builder;
 pub use manager::Manager;
@@ -118,6 +115,11 @@ pub use mongo_tang::{MongoManager, MongoPoolError};
 pub use postgres_tang::{PostgresManager, PostgresPoolError};
 #[cfg(feature = "redis")]
 pub use redis_tang::{RedisManager, RedisPoolError};
+#[cfg(feature = "actix-web")]
+use {
+    futures_util::{compat::Future01CompatExt, TryFutureExt},
+    tokio_timer01::Timeout,
+};
 
 use crate::manager::ManagerFuture;
 use crate::pool_inner::{PoolLock, State};
@@ -179,20 +181,27 @@ struct SharedPool<M: Manager> {
 
 impl<M: Manager> SharedPool<M> {
     #[cfg(not(feature = "actix-web"))]
-    async fn drop_connection(&self, _conn: Conn<M>) -> Result<Result<(), M::Error>, M::Error> {
+    async fn drop_connection(&self, _conn: Conn<M>) -> Result<(), M::Error> {
         //  We might need to spin up more connections to maintain the idle limit, e.g.
         //  if we hit connection lifetime limits
-        if self.pool_lock.decr_spawn_count() < self.statics.min_idle {
-            self.replenish_idle_connections().await
-        } else {
-            Ok(Ok(()))
+        let pending_count = self.pool_lock.decr_spawned_count(|total_now| {
+            if total_now < self.statics.min_idle {
+                Some(self.statics.min_idle - total_now)
+            } else {
+                None
+            }
+        });
+
+        match pending_count {
+            Some(count) => self.replenish_idle_connections(count).await,
+            None => Ok(()),
         }
     }
 
     // use `Builder`'s connection_timeout setting to cancel the `connect` method and return error.
     #[cfg(not(feature = "actix-web"))]
-    async fn add_connection(&self) -> Result<Result<(), M::Error>, M::Error> {
-        let result = self
+    async fn add_connection(&self) -> Result<(), M::Error> {
+        let conn = self
             .manager
             .connect()
             .timeout(self.statics.connection_timeout)
@@ -200,19 +209,16 @@ impl<M: Manager> SharedPool<M> {
             .map_err(|e| {
                 self.pool_lock.drop_pending(|_| true);
                 e
+            })?
+            .map_err(|e| {
+                self.pool_lock.drop_pending(|_| true);
+                e
             })?;
 
-        let conn = match result {
-            Ok(conn) => IdleConn::new(conn),
-            Err(e) => {
-                self.pool_lock.drop_pending(|_| true);
-                return Ok(Err(e));
-            }
-        };
+        self.pool_lock
+            .put_back_incr_spawn_count(IdleConn::new(conn));
 
-        self.pool_lock.put_back_incr_spawn_count(conn);
-
-        Ok(Ok(()))
+        Ok(())
     }
 
     // we map the check result's error to drop connection then return the result.
@@ -244,62 +250,59 @@ impl<M: Manager> SharedPool<M> {
     }
 
     #[cfg(not(feature = "actix-web"))]
-    async fn replenish_idle_connections(&self) -> Result<Result<(), M::Error>, M::Error> {
-        // incr pending count will return the sum of spawned and pending count.
-        while self.pool_lock.incr_pending_count() < self.statics.min_idle {
-            if let Err(e) = self.add_connection().await? {
-                return Ok(Err(e));
-            }
+    async fn replenish_idle_connections(&self, pending_count: u8) -> Result<(), M::Error> {
+        for i in 0..pending_count {
+            self.add_connection().await.map_err(|e| {
+                // we return when an error occur so we should drop all the pending after the i.
+                // (the pending of i is already dropped in add_connection method)
+                for _ii in (i + 1)..pending_count {
+                    self.pool_lock.drop_pending(|_| true);
+                }
+                e
+            })?;
         }
-        if let Err(e) = self.add_connection().await? {
-            return Ok(Err(e));
-        };
-
-        Ok(Ok(()))
+        Ok(())
     }
 
     // only used to spawn connections when starting the pool
     #[cfg(feature = "actix-web")]
-    async fn replenish_idle_connections_temp(&self) -> Result<(), M::Error> {
-        while self.pool_lock.incr_pending_count() <= self.statics.min_idle {
-            let conn = self
-                .manager
-                .connect()
-                .await
-                .map_err(|e| {
-                    self.pool_lock.drop_pending(|_| true);
-                    e
-                })
-                .expect("Failed to replenish connections");
+    async fn replenish_idle_connections_temp(&self, pending_count: u8) -> Result<(), M::Error> {
+        for _i in 0..pending_count {
+            let conn = self.manager.connect().await?;
 
-            let conn = IdleConn::new(conn);
-            self.pool_lock.put_back_incr_spawn_count(conn);
+            self.pool_lock
+                .put_back_incr_spawn_count(IdleConn::new(conn));
         }
+
         Ok(())
     }
 
     async fn reap_connections(&self) -> Result<(), M::Error> {
         let now = Instant::now();
 
-        let spawned = self.pool_lock.try_drop_conns(|conn| {
-            let mut should_drop = false;
-            if let Some(timeout) = self.statics.idle_timeout {
-                should_drop |= now - conn.idle_start >= timeout;
-            }
-            if let Some(lifetime) = self.statics.max_lifetime {
-                should_drop |= now - conn.conn.birth >= lifetime;
-            }
-            should_drop
-        });
+        let pending_new = self
+            .pool_lock
+            .try_drop_conns(self.statics.min_idle, |conn| {
+                let mut should_drop = false;
+                if let Some(timeout) = self.statics.idle_timeout {
+                    should_drop |= now - conn.idle_start >= timeout;
+                }
+                if let Some(lifetime) = self.statics.max_lifetime {
+                    should_drop |= now - conn.conn.birth >= lifetime;
+                }
+                should_drop
+            });
 
-        if let Some(spawned) = spawned {
-            if spawned < self.statics.min_idle {
-                #[cfg(not(feature = "actix-web"))]
-                return self.replenish_idle_connections().await?;
-            }
+        #[cfg(not(feature = "actix-web"))]
+        match pending_new {
+            Some(pending_new) => self.replenish_idle_connections(pending_new).await,
+            None => Ok(()),
         }
-
-        Ok(())
+        #[cfg(feature = "actix-web")]
+        {
+            let _ = pending_new;
+            Ok(())
+        }
     }
 
     fn garbage_collect(&self) {
@@ -308,13 +311,11 @@ impl<M: Manager> SharedPool<M> {
     }
 
     // ToDo: handle errors here.
-    #[cfg(not(feature = "actix-web"))]
     fn spawn<F, R>(&self, f: F) -> Result<(), tokio_executor::SpawnError>
     where
-        F: Future<Output = Result<R, M::Error>> + Send + 'static,
+        F: Future<Output = R> + Send + 'static,
     {
-        use futures_util::FutureExt;
-        tokio_executor::DefaultExecutor::current().spawn(Box::pin(f.map(|_| ())))
+        DefaultExecutor::current().spawn(Box::pin(f.map(|_| ())))
     }
 }
 
@@ -497,7 +498,7 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
         let mut conn = match self.conn.take() {
             Some(conn) => conn,
             None => {
-                self.pool.pool_lock.decr_spawn_count();
+                self.pool.pool_lock.decr_spawned_count(|_| None);
                 return;
             }
         };
@@ -520,21 +521,23 @@ fn spawn_drop_connection<M: Manager + Send>(shared: &Arc<SharedPool<M>>, conn: C
     let shared_clone = shared.clone();
     let _ = shared
         .spawn(async move { shared_clone.drop_connection(conn).await })
-        .map_err(|_| shared.pool_lock.decr_spawn_count());
+        .map_err(|_| shared.pool_lock.decr_spawned_count(|_| None));
 }
 
 // schedule reaping runs in a spawned future.
 fn schedule_one_reaping<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
     if shared.statics.max_lifetime.is_some() || shared.statics.idle_timeout.is_some() {
         let mut interval = Interval::new_interval(shared.statics.reaper_rate);
-        let shared = shared.clone();
+        let shared_clone = shared.clone();
 
-        tokio_executor::spawn(async move {
-            loop {
-                let _i = interval.next().await;
-                let _ = shared.reap_connections().await;
-            }
-        });
+        let _ = shared
+            .spawn(async move {
+                loop {
+                    let _i = interval.next().await;
+                    let _ = shared_clone.reap_connections().await;
+                }
+            })
+            .map_err(|e| panic!("{}", e));
     }
 }
 
@@ -542,14 +545,16 @@ fn schedule_one_reaping<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
 fn garbage_collect<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
     if shared.statics.use_gc {
         let mut interval = Interval::new_interval(shared.statics.reaper_rate * 6);
-        let shared = shared.clone();
+        let shared_clone = shared.clone();
 
-        tokio_executor::spawn(async move {
-            loop {
-                let _i = interval.next().await;
-                shared.garbage_collect();
-            }
-        });
+        let _ = shared
+            .spawn(async move {
+                loop {
+                    let _i = interval.next().await;
+                    shared_clone.garbage_collect();
+                }
+            })
+            .map_err(|e| panic!("{}", e));
     }
 }
 

@@ -47,9 +47,9 @@ fn main() {
         .block_on(
             Builder::new()
                 .always_check(false)
-                .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
-                .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
-                .reaper_rate(std::time::Duration::from_secs(15))
+                .idle_timeout(Some(std::time::Duration::from_secs(10)))
+                .max_lifetime(Some(std::time::Duration::from_secs(20)))
+                .reaper_rate(std::time::Duration::from_secs(5))
                 .min_idle(6)
                 .max_size(24)
                 .build(mgr),
@@ -99,14 +99,14 @@ async fn index(
     let pool_ref = pool.get().await.map_err(MyError::from)?;
 
     // deref or deref mut to get connection from pool_ref.
-    let (client, statements) = &*pool_ref;
+    let (client, _statements) = &*pool_ref;
 
     let st = client
         .prepare_typed("SELECT * FROM topics WHERE id=ANY($1)", &[Type::OID_ARRAY])
         .await
         .expect("Failed to prepare");
 
-    let (t, u) = client
+    let (t, _u) = client
         .query_raw(&st, [&IDS as &(dyn ToSql + Sync)].iter().map(|s| *s as _))
         .await
         .expect("Failed to query postgres")
