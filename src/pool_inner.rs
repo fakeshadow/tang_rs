@@ -113,7 +113,6 @@ impl<M: Manager + Send> PoolLock<M> {
     // and return the new pending count as option to notify the Pool to replenish connections
     // we use closure here as it's not need to try spawn new connections every time we decr spawn count
     // (like decr spawn count when a connection doesn't return to pool successfully)
-    #[inline]
     pub(crate) fn decr_spawned_count<F>(&self, try_spawn: F) -> Option<u8>
     where
         F: FnOnce(u8) -> Option<u8>,
@@ -132,7 +131,6 @@ impl<M: Manager + Send> PoolLock<M> {
     }
 
     // drop pending that last too long.
-    #[inline]
     pub(crate) fn drop_pending<F>(&self, should_drop: F)
     where
         F: FnOnce(&Pending) -> bool,
@@ -188,7 +186,6 @@ impl<M: Manager + Send> PoolLock<M> {
         }
     }
 
-    #[inline]
     pub(crate) fn put_back_incr_spawn_count(&self, conn: IdleConn<M>) {
         let mut inner = self.inner.lock().unwrap();
         inner.pending.pop_front();
@@ -248,58 +245,58 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
         let pool_lock = self.pool_lock;
 
         // if we get a connection we return directly
-        if let Some(conn) = pool_lock.try_pop_conn() {
-            self.acquired = true;
-            return Poll::Ready(conn);
-        }
-
-        {
-            let mut inner = pool_lock.inner.lock().unwrap();
-
-            // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
-            #[cfg(not(feature = "actix-web"))]
-            {
-                if (inner.spawned + inner.pending.len() as u8) < self.shared_pool.statics.max_size {
-                    inner.pending.push_back(Pending::new());
-                    let shared_clone = self.shared_pool.clone();
-                    let _ = self
-                        .shared_pool
-                        .spawn(async move { shared_clone.add_connection().await })
-                        .map_err(|_| inner.pending.pop_front());
-                }
+        match pool_lock.try_pop_conn() {
+            Some(conn) => {
+                self.acquired = true;
+                Poll::Ready(conn)
             }
+            None => {
+                let shared = self.shared_pool;
+                let mut inner = pool_lock.inner.lock().unwrap();
 
-            #[cfg(feature = "actix-web")]
-            let _clippy_ignore = self.shared_pool;
+                // a connection could returned right before we force lock the pool.
+                if let Some(conn) = inner.conn.pop_front() {
+                    self.acquired = true;
+                    return Poll::Ready(conn);
+                }
 
-            // Either insert our waker if we don't have a wait key yet or register a new one if we already have a wait key.
-            match self.wait_key {
-                Some(wait_key) => {
-                    // There is already an entry in the list of waiters.
-                    // Just reset the waker if it was removed.
-                    if inner.waiters[wait_key].is_none() {
+                // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
+                #[cfg(not(feature = "actix-web"))]
+                {
+                    if (inner.spawned + inner.pending.len() as u8) < shared.statics.max_size {
+                        inner.pending.push_back(Pending::new());
+                        let shared_clone = shared.clone();
+                        let _ = shared
+                            .spawn(async move { shared_clone.add_connection().await })
+                            .map_err(|_| inner.pending.pop_front());
+                    }
+                }
+
+                #[cfg(feature = "actix-web")]
+                let _clippy_ignore = shared;
+
+                // Either insert our waker if we don't have a wait key yet or register a new one if we already have a wait key.
+                match self.wait_key {
+                    Some(wait_key) => {
+                        // There is already an entry in the list of waiters.
+                        // Just reset the waker if it was removed.
+                        if inner.waiters[wait_key].is_none() {
+                            let waker = cx.waker().clone();
+                            inner.waiters[wait_key] = Some(waker);
+                            inner.waiters_queue.insert(wait_key);
+                        }
+                    }
+                    None => {
                         let waker = cx.waker().clone();
-                        inner.waiters[wait_key] = Some(waker);
+                        let wait_key = inner.waiters.insert(Some(waker));
+                        self.wait_key = Some(wait_key);
                         inner.waiters_queue.insert(wait_key);
                     }
                 }
-                None => {
-                    let waker = cx.waker().clone();
-                    let wait_key = inner.waiters.insert(Some(waker));
-                    self.wait_key = Some(wait_key);
-                    inner.waiters_queue.insert(wait_key);
-                }
+
+                Poll::Pending
             }
         }
-
-        // double check to make sure if we can get a connection.
-        // If we can then we just undone the previous steps and return with our connection.
-        if let Some(conn) = pool_lock.try_pop_conn() {
-            self.acquired = true;
-            return Poll::Ready(conn);
-        }
-
-        Poll::Pending
     }
 }
 

@@ -139,19 +139,18 @@ fn test_redis(pool: MyRedisPool) -> impl Future01<Item = HttpResponse, Error = E
 }
 
 async fn test_redisasync(pool: MyRedisPool) -> Result<HttpResponse, Error> {
-    let mut pool_ref = pool
+
+    let mut client = pool
         .get()
         .await
-        .map_err(|_| ErrorInternalServerError("lol"))?;
-
-    let client = &mut *pool_ref;
+        .map_err(|_| ErrorInternalServerError("lol"))?
+        .get_conn()
+        .clone();
 
     redis::cmd("PING")
-        .query_async::<_, ()>(client)
+        .query_async::<_, ()>(&mut client)
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
-
-    drop(pool_ref);
 
     Ok(HttpResponse::Ok().finish())
 }

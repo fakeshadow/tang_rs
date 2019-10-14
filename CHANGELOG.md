@@ -1,3 +1,10 @@
+(October 14, 2019)
+----------------------
+
+### Add
+- `tang_rs::CacheStatement` for bulk insert/remove statements to `PoolRef<PostgresManager<_>>`
+
+
 (October 11, 2019)
 ----------------------
 

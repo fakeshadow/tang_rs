@@ -11,6 +11,7 @@ use tokio_postgres::{
 };
 
 use crate::manager::{Manager, ManagerFuture};
+use crate::PoolRef;
 
 #[derive(Clone)]
 pub struct PostgresManager<Tls>
@@ -82,7 +83,7 @@ where
             tokio_executor::spawn(conn.map(|_| ()));
 
             let prepares = &self.prepares;
-            let mut statements = HashMap::new();
+            let mut statements = HashMap::with_capacity(prepares.len());
             let mut futures = Vec::with_capacity(prepares.len());
 
             // make prepared statements if there is any and set manager prepares for later use.
@@ -129,6 +130,68 @@ where
 
 // type for prepared statement's hash map. key is used as statement's alias
 type PreparedHashMap = HashMap<String, PreparedStatement>;
+
+type StatementFuture<'a, SELF> =
+    Pin<Box<dyn Future<Output = Result<&'a mut SELF, PostgresPoolError>> + Send + 'a>>;
+
+/// helper trait for cached statement for this connection.
+/// Statements only work on the connection prepare them and not other connections in the pool.
+pub trait CacheStatement<'a> {
+    /// Only statements with new alias as key in HashMap will be inserted.
+    ///
+    /// The statements with an already existed alias will be ignored.
+    ///
+    /// The format of statement is (<alias string> , <Sql string>, <tokio_postgres::types::Type>)
+    fn insert_statements(
+        &'a mut self,
+        statements: &'a [(&'a str, &'a str, &'a [Type])],
+    ) -> StatementFuture<'a, Self>;
+
+    /// Clear the statements of this connection.
+    fn clear_statements(&mut self) -> &mut Self;
+}
+
+impl<'a, Tls> CacheStatement<'a> for PoolRef<'_, PostgresManager<Tls>>
+where
+    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
+    Tls::Stream: Send,
+    Tls::TlsConnect: Send,
+    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    fn insert_statements(
+        &'a mut self,
+        statements: &'a [(&'a str, &'a str, &'a [Type])],
+    ) -> StatementFuture<'a, Self> {
+        Box::pin(async move {
+            let (cli, sts) = &mut **self;
+
+            let mut futures = Vec::with_capacity(statements.len());
+            for (alias, query, types) in statements
+                .iter()
+                .map(|(alias, query, types)| (*alias, *query, *types))
+            {
+                if !sts.contains_key(alias) {
+                    let alias = alias.to_owned();
+                    let f = cli.prepare_typed(query, types).map_ok(|st| (alias, st));
+                    futures.push(f);
+                }
+            }
+
+            for result in futures_util::future::join_all(futures).await.into_iter() {
+                let (alias, st) = result?;
+                sts.insert(alias, st);
+            }
+
+            Ok(self)
+        })
+    }
+
+    fn clear_statements(&mut self) -> &mut Self {
+        let (_cli, sts) = &mut **self;
+        sts.clear();
+        self
+    }
+}
 
 // wrapper type for prepared statement
 // ToDo: add runtime refresh of prepared statement

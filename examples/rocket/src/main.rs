@@ -47,10 +47,10 @@ fn main() {
         .block_on(
             Builder::new()
                 .always_check(false)
-                .idle_timeout(Some(std::time::Duration::from_secs(10)))
-                .max_lifetime(Some(std::time::Duration::from_secs(20)))
-                .reaper_rate(std::time::Duration::from_secs(5))
-                .min_idle(6)
+                .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
+                .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+                .reaper_rate(std::time::Duration::from_secs(15))
+                .min_idle(1)
                 .max_size(24)
                 .build(mgr),
         )
@@ -63,8 +63,8 @@ fn main() {
         .block_on(
             Builder::new()
                 .always_check(false)
-                .idle_timeout(Some(std::time::Duration::from_secs(10)))
-                .max_lifetime(Some(std::time::Duration::from_secs(30)))
+                .idle_timeout(Some(std::time::Duration::from_secs(60)))
+                .max_lifetime(Some(std::time::Duration::from_secs(2 * 60)))
                 .reaper_rate(std::time::Duration::from_secs(15))
                 .min_idle(1)
                 .max_size(24)
@@ -140,18 +140,15 @@ async fn index(
 }
 
 #[get("/redis")]
-async fn index2(pool: State<'_, Pool<RedisManager>>) -> Result<String, Debug<std::io::Error>> {
-    let mut pool_ref = pool.get().await.map_err(MyError::from)?;
-    let client = &mut *pool_ref;
+async fn index2(pool: State<'_, Pool<RedisManager>>) -> Result<(), Debug<std::io::Error>> {
+    let mut client = pool.get().await.map_err(MyError::from)?.get_conn().clone();
 
     redis::cmd("PING")
-        .query_async::<_, ()>(client)
+        .query_async::<_, ()>(&mut client)
         .await
         .expect("Failed to query redis");
 
-    drop(pool_ref);
-
-    Ok("done".into())
+    Ok(())
 }
 
 struct MyError;

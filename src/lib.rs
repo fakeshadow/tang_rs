@@ -112,7 +112,7 @@ pub use manager::Manager;
 #[cfg(feature = "mongodb")]
 pub use mongo_tang::{MongoManager, MongoPoolError};
 #[cfg(feature = "tokio-postgres")]
-pub use postgres_tang::{PostgresManager, PostgresPoolError};
+pub use postgres_tang::{CacheStatement, PostgresManager, PostgresPoolError};
 #[cfg(feature = "redis")]
 pub use redis_tang::{RedisManager, RedisPoolError};
 #[cfg(feature = "actix-web")]

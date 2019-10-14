@@ -61,5 +61,7 @@ git = "https://github.com/sfackler/rust-postgres"
 
 [dependencies.redis]
 optional = true
-git = "https://github.com/fakeshadow/redis-rs"
+git = "https://github.com/Marwes/redis-rs"
 branch = "async_await_api"
+default-features = false
+features = [ "executor" ]

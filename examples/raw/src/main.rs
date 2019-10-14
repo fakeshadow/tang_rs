@@ -1,5 +1,6 @@
-use tang_rs::{Builder, PostgresManager, PostgresPoolError, RedisManager};
 use tokio_postgres::types::Type;
+
+use tang_rs::{Builder, PostgresManager, PostgresPoolError, RedisManager};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -78,21 +79,27 @@ async fn main() -> std::io::Result<()> {
     /*
         It's possible to insert new statement into statements from pool_ref.
         But be ware the statement will only work on this specific connection and not other connections in the pool.
-        The additional statement will also be dropped when the connection is dropped from pool.
-        A newly spawned connection will also not include this additional statement.
+        The additional statement will be dropped when the connection is dropped from pool.
+        A newly spawned connection will not include this additional statement.
 
-        * This newly inserted statement most likely can't take advantage of the pipeline query features also
+        * This newly inserted statement most likely can't take advantage of the pipeline query features
         as we didn't join futures when prepare this statement.
 
-        It's suggested that if you want pipelined statements you should join the futures of prepare before calling await on them.
+        * It's suggested that if you want pipelined statements you should join the futures of prepare before calling await on them.
+        There is tang_rs::CacheStatement trait for PoolRef<PostgresManager<T>> to help you streamline this operation.
     */
-    let statement_new = client
-        .prepare_typed("SELECT * FROM topics WHERE id=ANY($1)", &[])
-        .await
-        .expect("Failed to prepare statement");
-    statements.insert("new_statement_alias".into(), statement_new);
 
-    let statement = statements.get("new_statement_alias").unwrap();
+    let statement = match statements.get("statement_new") {
+        Some(statement_new) => statement_new,
+        None => {
+            let statement_new = client
+                .prepare_typed("SELECT * FROM topics WHERE id=ANY($1)", &[])
+                .await
+                .expect("Failed to prepare statement");
+            statements.insert("statement_new".into(), statement_new);
+            statements.get("statement_new").unwrap()
+        }
+    };
 
     let ids = vec![1u32, 2, 3, 4, 5];
 
