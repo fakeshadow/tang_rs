@@ -1,5 +1,5 @@
 # tang_rs
-a connection pool for tokio-postgres and redis-rs. support async/await syntex.
+A light weight connection pool for tokio-postgres and redis-rs. support async/await syntax.
 
 #### Requirement:
 `rustc 1.39.0-beta.5 (fa5c2f3e5 2019-10-02)`<br>

@@ -1,5 +1,4 @@
-//! # A tokio-postgres connection pool.
-//! use `tokio-0.2` runtime.
+//! # A connection pool running one tokio runtime.
 //! smoe code come from
 //! [bb8](https://docs.rs/bb8/0.3.1/bb8/)
 //! [L3-37](https://github.com/OneSignal/L3-37/)
@@ -10,7 +9,7 @@
 //! can't be used in nested runtimes.
 //!
 //! # Example:
-//!``` rust
+//!```no_run
 //!use std::time::Duration;
 //!
 //!use futures::TryStreamExt;
@@ -47,6 +46,7 @@
 //!        .build(mgr)
 //!        .await
 //!        .unwrap_or_else(|_| panic!("can't make pool"));
+//!
 //!    // wait a bit as the pool spawn connections asynchronously
 //!    tokio::timer::delay(std::time::Instant::now() + std::time::Duration::from_secs(1)).await;
 //!
@@ -55,6 +55,19 @@
 //!
 //!    // deref or derefmut to get connection.
 //!    let (client, statements) = &*pool_ref;
+//!
+//!    /*
+//!        It's possible to insert new statement into statements from pool_ref.
+//!        But be ware the statement will only work on this specific connection and not other connections in the pool.
+//!        The additional statement will be dropped when the connection is dropped from pool.
+//!        A newly spawned connection will not include this additional statement.
+//!
+//!        * This newly inserted statement most likely can't take advantage of the pipeline query features
+//!        as we didn't join futures when prepare this statement.
+//!
+//!        * It's suggested that if you want pipelined statements you should join the futures of prepare before calling await on them.
+//!        There is tang_rs::CacheStatement trait for PoolRef<PostgresManager<T>> to help you streamline this operation.
+//!    */
 //!
 //!    // use the alias input when building manager to get specific statement.
 //!    let statement = statements.get("get_topics").unwrap();
@@ -67,13 +80,8 @@
 //!    let _rows = pool
 //!        .run(|mut conn| Box::pin(  // pin the async function to make sure the &mut Conn outlives our closure.
 //!            async move {
-//!                let (client, statements) = &mut conn;
+//!                let (client, statements) = &conn;
 //!                let statement = statements.get("get_topics").unwrap();
-//!
-//!                // It's possible to overwrite the source statements with new prepared ones.
-//!                // It's just a hash map with a String as key and statement as value.
-//!                // but be ware when a new connection spawn the associated statements will be the ones you passed in builder.
-//!
 //!                let rows = client.query(statement, &[]).await?;
 //!
 //!                // default error type.
@@ -173,18 +181,18 @@ impl<M: Manager> From<IdleConn<M>> for Conn<M> {
     }
 }
 
-struct SharedPool<M: Manager> {
+struct SharedPool<M: Manager + Send> {
     statics: Builder,
     manager: M,
     pool_lock: PoolLock<M>,
 }
 
-impl<M: Manager> SharedPool<M> {
+impl<M: Manager + Send> SharedPool<M> {
     #[cfg(not(feature = "actix-web"))]
     async fn drop_connection(&self, _conn: Conn<M>) -> Result<(), M::Error> {
         //  We might need to spin up more connections to maintain the idle limit, e.g.
         //  if we hit connection lifetime limits
-        let pending_count = self.pool_lock.decr_spawned_count(|total_now| {
+        let pending_count = self.pool_lock.decr_spawned(|total_now| {
             if total_now < self.statics.min_idle {
                 Some(self.statics.min_idle - total_now)
             } else {
@@ -207,16 +215,15 @@ impl<M: Manager> SharedPool<M> {
             .timeout(self.statics.connection_timeout)
             .await
             .map_err(|e| {
-                self.pool_lock.drop_pending(|_| true);
+                self.pool_lock.decr_pending(|_| true);
                 e
             })?
             .map_err(|e| {
-                self.pool_lock.drop_pending(|_| true);
+                self.pool_lock.decr_pending(|_| true);
                 e
             })?;
 
-        self.pool_lock
-            .put_back_incr_spawn_count(IdleConn::new(conn));
+        self.pool_lock.put_back_incr_spawned(IdleConn::new(conn));
 
         Ok(())
     }
@@ -256,7 +263,7 @@ impl<M: Manager> SharedPool<M> {
                 // we return when an error occur so we should drop all the pending after the i.
                 // (the pending of i is already dropped in add_connection method)
                 for _ii in (i + 1)..pending_count {
-                    self.pool_lock.drop_pending(|_| true);
+                    self.pool_lock.decr_pending(|_| true);
                 }
                 e
             })?;
@@ -270,8 +277,7 @@ impl<M: Manager> SharedPool<M> {
         for _i in 0..pending_count {
             let conn = self.manager.connect().await?;
 
-            self.pool_lock
-                .put_back_incr_spawn_count(IdleConn::new(conn));
+            self.pool_lock.put_back_incr_spawned(IdleConn::new(conn));
         }
 
         Ok(())
@@ -285,10 +291,10 @@ impl<M: Manager> SharedPool<M> {
             .try_drop_conns(self.statics.min_idle, |conn| {
                 let mut should_drop = false;
                 if let Some(timeout) = self.statics.idle_timeout {
-                    should_drop |= now - conn.idle_start >= timeout;
+                    should_drop |= now >= conn.idle_start + timeout;
                 }
                 if let Some(lifetime) = self.statics.max_lifetime {
-                    should_drop |= now - conn.conn.birth >= lifetime;
+                    should_drop |= now >= conn.idle_start + lifetime;
                 }
                 should_drop
             });
@@ -307,7 +313,7 @@ impl<M: Manager> SharedPool<M> {
 
     fn garbage_collect(&self) {
         self.pool_lock
-            .drop_pending(|pending| pending.should_remove(self.statics.connection_timeout));
+            .decr_pending(|pending| pending.should_remove(self.statics.connection_timeout));
     }
 
     // ToDo: handle errors here.
@@ -319,21 +325,21 @@ impl<M: Manager> SharedPool<M> {
     }
 }
 
-pub struct Pool<M: Manager>(Arc<SharedPool<M>>);
+pub struct Pool<M: Manager + Send>(Arc<SharedPool<M>>);
 
-impl<M: Manager> Clone for Pool<M> {
+impl<M: Manager + Send> Clone for Pool<M> {
     fn clone(&self) -> Self {
         Pool(self.0.clone())
     }
 }
 
-impl<M: Manager> fmt::Debug for Pool<M> {
+impl<M: Manager + Send> fmt::Debug for Pool<M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_fmt(format_args!("Pool({:p})", self.0))
     }
 }
 
-impl<M: Manager> Pool<M> {
+impl<M: Manager + Send> Pool<M> {
     fn new(builder: Builder, manager: M) -> Self {
         let size = builder.max_size as usize;
 
@@ -391,7 +397,7 @@ impl<M: Manager> Pool<M> {
         Ok(result?)
     }
 
-    // recursive when the connection is broken. we exit with at most 3 retries.
+    // Recursive when the connection is broken(When enabling the always_check). We exit with at most 3 retries and return an error.
     fn get_idle_connection(&self, mut retry: u8) -> ManagerFuture<Result<Conn<M>, M::Error>> {
         Box::pin(async move {
             let shared_pool = &self.0;
@@ -498,7 +504,7 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
         let mut conn = match self.conn.take() {
             Some(conn) => conn,
             None => {
-                self.pool.pool_lock.decr_spawned_count(|_| None);
+                self.pool.pool_lock.decr_spawned(|_| None);
                 return;
             }
         };
@@ -521,7 +527,7 @@ fn spawn_drop_connection<M: Manager + Send>(shared: &Arc<SharedPool<M>>, conn: C
     let shared_clone = shared.clone();
     let _ = shared
         .spawn(async move { shared_clone.drop_connection(conn).await })
-        .map_err(|_| shared.pool_lock.decr_spawned_count(|_| None));
+        .map_err(|_| shared.pool_lock.decr_spawned(|_| None));
 }
 
 // schedule reaping runs in a spawned future.

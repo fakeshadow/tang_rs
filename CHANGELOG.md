@@ -1,3 +1,10 @@
+(October 16, 2019)
+----------------------
+
+### Add
+- `tang_rs::PrepareStatement` for add/remove prepared statements(Statements that constructed when a connection spawn) to `PoolRef<PostgresManager<_>>`
+
+
 (October 14, 2019)
 ----------------------
 

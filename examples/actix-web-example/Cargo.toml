@@ -28,7 +28,7 @@ default-features = false
 features = [ "io", "codec", "fs" ]
 
 [dependencies.tokio-postgres]
-git = "https://github.com/sfackler/rust-postgres"
+version = "0.5.0-alpha.1"
 
 [dependencies.redis]
 git = "https://github.com/Marwes/redis-rs"
@@ -39,4 +39,4 @@ features = [ "executor" ]
 [dependencies.tang-rs]
 path = "../../"
 default-features = false
-features = [ "actix-web", "tokio-postgres" ]
+features = [ "actix-web" ]

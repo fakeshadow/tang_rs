@@ -3,8 +3,8 @@ name = "tang-rs"
 version = "0.1.0"
 authors = ["fakeshadow <24548779@qq.com>"]
 edition = "2018"
-description = "A tokio-postgres Connection pool"
-keywords = ["database", "async", "tokio-postgres"]
+description = "A light weight asynchronous connection pool runs on tokio"
+keywords = ["database", "async", "pool"]
 license = "MIT"
 exclude = ["examples/*"]
 repository = "https://github.com/fakeshadow/tang_rs"
@@ -15,11 +15,8 @@ name = "tang_rs"
 path = "src/lib.rs"
 
 [features]
-default = [ "tokio-postgres", "redis" ]
-actix-web = [ "tokio-timer01", "actix-rt", "tokio-postgres", "redis" ]
-with-mongodb = [ "mongodb" ]
-with-tokio-postgres = [ "tokio-postgres" ]
-with-redis = [ "redis" ]
+default = ["tokio-postgres", "redis"]
+actix-web = ["tokio-timer01", "tokio-postgres", "redis"]
 
 [workspace]
 members = [
@@ -27,10 +24,6 @@ members = [
   "examples/rocket",
   "examples/raw",
 ]
-
-[dependencies.actix-rt]
-version = "0.2.5"
-optional = true
 
 [dependencies.futures-util-preview]
 version = "=0.3.0-alpha.19"
@@ -57,7 +50,7 @@ optional = true
 
 [dependencies.tokio-postgres]
 optional = true
-git = "https://github.com/sfackler/rust-postgres"
+version = "0.5.0-alpha.1"
 
 [dependencies.redis]
 optional = true

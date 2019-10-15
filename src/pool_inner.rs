@@ -73,6 +73,26 @@ impl<M: Manager + Send> PoolInner<M> {
         }
         None
     }
+
+    fn decr_spawned_inner(&mut self) {
+        if self.spawned != 0 {
+            self.spawned -= 1;
+        }
+    }
+
+    fn decr_pending_inner(&mut self) {
+        self.pending.pop_front();
+    }
+
+    fn total(&mut self) -> u8 {
+        self.spawned + self.pending.len() as u8
+    }
+
+    fn incr_pending_inner(&mut self, count: u8) {
+        for _i in 0..count {
+            self.pending.push_back(Pending::new());
+        }
+    }
 }
 
 pub(crate) struct PoolLock<M: Manager + Send> {
@@ -113,32 +133,27 @@ impl<M: Manager + Send> PoolLock<M> {
     // and return the new pending count as option to notify the Pool to replenish connections
     // we use closure here as it's not need to try spawn new connections every time we decr spawn count
     // (like decr spawn count when a connection doesn't return to pool successfully)
-    pub(crate) fn decr_spawned_count<F>(&self, try_spawn: F) -> Option<u8>
+    pub(crate) fn decr_spawned<F>(&self, try_spawn: F) -> Option<u8>
     where
         F: FnOnce(u8) -> Option<u8>,
     {
         let mut inner = self.inner.lock().unwrap();
-        if inner.spawned != 0 {
-            inner.spawned -= 1;
-        }
+        inner.decr_spawned_inner();
 
-        try_spawn(inner.spawned + inner.pending.len() as u8).map(|pending_new| {
-            for _i in 0..pending_new {
-                inner.pending.push_back(Pending::new());
-            }
+        try_spawn(inner.total()).map(|pending_new| {
+            inner.incr_pending_inner(pending_new);
             pending_new
         })
     }
 
-    // drop pending that last too long.
-    pub(crate) fn drop_pending<F>(&self, should_drop: F)
+    pub(crate) fn decr_pending<F>(&self, should_drop: F)
     where
         F: FnOnce(&Pending) -> bool,
     {
         let mut inner = self.inner.lock().unwrap();
         if let Some(pending) = inner.pending.front() {
             if should_drop(pending) {
-                inner.pending.pop_front();
+                inner.decr_pending_inner();
             }
         }
     }
@@ -154,19 +169,16 @@ impl<M: Manager + Send> PoolLock<M> {
                 if let Some(conn) = inner.conn.get(index) {
                     if should_drop(conn) {
                         inner.conn.remove(index);
-                        if inner.spawned != 0 {
-                            inner.spawned -= 1;
-                        }
+                        inner.decr_spawned_inner();
                     }
                 }
             }
 
-            let total_now = inner.spawned + inner.pending.len() as u8;
+            let total_now = inner.total();
             if total_now < min_idle {
                 let pending_new = min_idle - total_now;
-                for _i in 0..pending_new {
-                    inner.pending.push_back(Pending::new())
-                }
+
+                inner.incr_pending_inner(pending_new);
 
                 Some(pending_new)
             } else {
@@ -177,25 +189,25 @@ impl<M: Manager + Send> PoolLock<M> {
 
     #[inline]
     pub(crate) fn put_back(&self, conn: IdleConn<M>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.conn.push_back(conn);
-        let waker = inner.get_waker();
-        drop(inner);
-        if let Some(waker) = waker {
+        if let Some(waker) = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.conn.push_back(conn);
+            inner.get_waker()
+        } {
             waker.wake();
         }
     }
 
-    pub(crate) fn put_back_incr_spawn_count(&self, conn: IdleConn<M>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.pending.pop_front();
-        if (inner.spawned as usize) < inner.conn.capacity() {
-            inner.conn.push_back(conn);
-            inner.spawned += 1;
-        }
-        let waker = inner.get_waker();
-        drop(inner);
-        if let Some(waker) = waker {
+    pub(crate) fn put_back_incr_spawned(&self, conn: IdleConn<M>) {
+        if let Some(waker) = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.decr_pending_inner();
+            if (inner.spawned as usize) < inner.conn.capacity() {
+                inner.conn.push_back(conn);
+                inner.spawned += 1;
+            }
+            inner.get_waker()
+        } {
             waker.wake();
         }
     }
@@ -251,7 +263,6 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
                 Poll::Ready(conn)
             }
             None => {
-                let shared = self.shared_pool;
                 let mut inner = pool_lock.inner.lock().unwrap();
 
                 // a connection could returned right before we force lock the pool.
@@ -261,34 +272,32 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
                 }
 
                 // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
+                let shared = self.shared_pool;
                 #[cfg(not(feature = "actix-web"))]
                 {
-                    if (inner.spawned + inner.pending.len() as u8) < shared.statics.max_size {
-                        inner.pending.push_back(Pending::new());
+                    if inner.total() < shared.statics.max_size {
+                        inner.incr_pending_inner(1);
                         let shared_clone = shared.clone();
                         let _ = shared
                             .spawn(async move { shared_clone.add_connection().await })
-                            .map_err(|_| inner.pending.pop_front());
+                            .map_err(|_| inner.decr_pending_inner());
                     }
                 }
 
                 #[cfg(feature = "actix-web")]
                 let _clippy_ignore = shared;
 
-                // Either insert our waker if we don't have a wait key yet or register a new one if we already have a wait key.
+                // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
                 match self.wait_key {
                     Some(wait_key) => {
-                        // There is already an entry in the list of waiters.
-                        // Just reset the waker if it was removed.
+                        // if we are woken and have no key in waitesr then we should not be in queue anymore.
                         if inner.waiters[wait_key].is_none() {
-                            let waker = cx.waker().clone();
-                            inner.waiters[wait_key] = Some(waker);
                             inner.waiters_queue.insert(wait_key);
+                            inner.waiters[wait_key] = Some(cx.waker().clone());
                         }
                     }
                     None => {
-                        let waker = cx.waker().clone();
-                        let wait_key = inner.waiters.insert(Some(waker));
+                        let wait_key = inner.waiters.insert(Some(cx.waker().clone()));
                         self.wait_key = Some(wait_key);
                         inner.waiters_queue.insert(wait_key);
                     }

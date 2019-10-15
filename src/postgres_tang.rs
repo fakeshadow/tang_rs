@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::RwLock;
 use std::{fmt, str::FromStr};
 
 use futures_util::{FutureExt, TryFutureExt};
@@ -13,14 +14,13 @@ use tokio_postgres::{
 use crate::manager::{Manager, ManagerFuture};
 use crate::PoolRef;
 
-#[derive(Clone)]
 pub struct PostgresManager<Tls>
 where
     Tls: MakeTlsConnect<Socket>,
 {
     config: Config,
     tls: Tls,
-    prepares: PreparedHashMap,
+    prepares: RwLock<PreparedHashMap>,
 }
 
 impl<Tls> PostgresManager<Tls>
@@ -33,7 +33,7 @@ where
         PostgresManager {
             config,
             tls,
-            prepares: HashMap::new(),
+            prepares: RwLock::new(HashMap::new()),
         }
     }
 
@@ -60,9 +60,11 @@ where
     ///     .prepare_statement("get_table_by_id", "SELECT * from table where id=$1, key=$2", &[Type::OID, Type::VARCHAR]);
     /// ```
     /// alias is used to call specific statement when using the connection.
-    pub fn prepare_statement(mut self, alias: &str, statement: &str, types: &[Type]) -> Self {
+    pub fn prepare_statement(self, alias: &str, query: &str, types: &[Type]) -> Self {
         self.prepares
-            .insert(alias.into(), (statement, types).into());
+            .write()
+            .expect("Failed to lock/write prepared statements")
+            .insert(alias.into(), (query, types).into());
         self
     }
 }
@@ -82,26 +84,28 @@ where
             let (c, conn) = self.config.connect(self.tls.clone()).await?;
             tokio_executor::spawn(conn.map(|_| ()));
 
-            let prepares = &self.prepares;
-            let mut statements = HashMap::with_capacity(prepares.len());
+            let prepares = self
+                .prepares
+                .read()
+                .expect("Failed to lock/read prepared statements")
+                .clone();
+            let mut sts = HashMap::with_capacity(prepares.len());
             let mut futures = Vec::with_capacity(prepares.len());
 
             // make prepared statements if there is any and set manager prepares for later use.
             for p in prepares.iter() {
                 let (alias, PreparedStatement(query, types)) = p;
                 let alias = alias.to_string();
-                let future = c
-                    .prepare_typed(query, &types)
-                    .map_ok(|statement| (alias, statement));
+                let future = c.prepare_typed(query, &types).map_ok(|st| (alias, st));
                 futures.push(future);
             }
 
             for result in futures_util::future::join_all(futures).await.into_iter() {
-                let (alias, statement) = result?;
-                statements.insert(alias, statement);
+                let (alias, st) = result?;
+                sts.insert(alias, st);
             }
 
-            Ok((c, statements))
+            Ok((c, sts))
         })
     }
 
@@ -128,9 +132,6 @@ where
     }
 }
 
-// type for prepared statement's hash map. key is used as statement's alias
-type PreparedHashMap = HashMap<String, PreparedStatement>;
-
 type StatementFuture<'a, SELF> =
     Pin<Box<dyn Future<Output = Result<&'a mut SELF, PostgresPoolError>> + Send + 'a>>;
 
@@ -141,7 +142,7 @@ pub trait CacheStatement<'a> {
     ///
     /// The statements with an already existed alias will be ignored.
     ///
-    /// The format of statement is (<alias string> , <Sql string>, <tokio_postgres::types::Type>)
+    /// The format of statement is (<alias str> , <query str>, <tokio_postgres::types::Type>)
     fn insert_statements(
         &'a mut self,
         statements: &'a [(&'a str, &'a str, &'a [Type])],
@@ -193,14 +194,62 @@ where
     }
 }
 
+/// helper trait for add/remove prepared statements of PostgresManager.
+pub trait PrepareStatement {
+    /// The prepared statements will be constructed when new connections spawns into the pool.
+    ///
+    /// This can be achieved by calling `PoolRef.take_conn()` until all connections in pool are dropped.
+    ///
+    /// The format of statement is (<alias str> , <query str>, <tokio_postgres::types::Type>)
+    fn prepare_statements(&mut self, statements: &[(&str, &str, &[Type])]) -> &mut Self;
+
+    /// Clear the statements of PostgresManager.
+    fn clear_prepared_statements(&mut self) -> &mut Self;
+}
+
+impl<Tls> PrepareStatement for PoolRef<'_, PostgresManager<Tls>>
+where
+    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
+    Tls::Stream: Send,
+    Tls::TlsConnect: Send,
+    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    fn prepare_statements(&mut self, statements: &[(&str, &str, &[Type])]) -> &mut Self {
+        let mut prepares = self
+            .pool
+            .manager
+            .prepares
+            .write()
+            .expect("Failed to lock/write prepared statements");
+
+        for (alias, query, types) in statements.iter() {
+            prepares.insert((*alias).into(), (*query, *types).into());
+        }
+
+        self
+    }
+
+    fn clear_prepared_statements(&mut self) -> &mut Self {
+        self.pool
+            .manager
+            .prepares
+            .write()
+            .expect("Failed to lock/write prepared statements")
+            .clear();
+        self
+    }
+}
+
+// type for prepared statement's hash map. key is used as statement's alias
+type PreparedHashMap = HashMap<String, PreparedStatement>;
+
 // wrapper type for prepared statement
-// ToDo: add runtime refresh of prepared statement
 #[derive(Clone)]
 pub struct PreparedStatement(String, Vec<Type>);
 
 impl From<(&str, &[Type])> for PreparedStatement {
-    fn from((st, typs): (&str, &[Type])) -> Self {
-        PreparedStatement(st.into(), typs.into())
+    fn from((query, types): (&str, &[Type])) -> Self {
+        PreparedStatement(query.into(), types.into())
     }
 }
 

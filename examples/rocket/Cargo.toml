@@ -29,10 +29,7 @@ version = "=0.3.0-alpha.19"
 features = [ "compat", "async-await" ]
 
 [dependencies.tokio-postgres]
-git = "https://github.com/sfackler/rust-postgres"
-
-[dependencies.postgres-types]
-git = "https://github.com/sfackler/rust-postgres"
+version = "0.5.0-alpha.1"
 
 [dependencies.redis]
 git = "https://github.com/Marwes/redis-rs"
@@ -42,4 +39,3 @@ features = [ "executor" ]
 
 [dependencies.tang-rs]
 path = "../../"
-features = [ "default", "tokio-postgres" ]

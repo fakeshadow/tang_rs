@@ -13,10 +13,12 @@ use rocket::{
     State,
 };
 use tokio::runtime::Runtime;
-use tokio_postgres::{types::Type, Row};
+use tokio_postgres::{
+    types::{ToSql, Type},
+    Row,
+};
 
 use futures::TryStreamExt;
-use postgres_types::ToSql;
 use tang_rs::{Builder, Pool, PostgresManager, PostgresPoolError, RedisManager, RedisPoolError};
 
 // dummy data
@@ -75,7 +77,7 @@ fn main() {
     let cfg = Config::build(Environment::Production)
         .address("localhost")
         .port(8000)
-        .workers(24)
+        .workers(12)
         .keep_alive(10)
         .expect("Failed to build Rocket Config");
 

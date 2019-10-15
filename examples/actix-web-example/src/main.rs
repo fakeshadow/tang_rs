@@ -139,7 +139,6 @@ fn test_redis(pool: MyRedisPool) -> impl Future01<Item = HttpResponse, Error = E
 }
 
 async fn test_redisasync(pool: MyRedisPool) -> Result<HttpResponse, Error> {
-
     let mut client = pool
         .get()
         .await
