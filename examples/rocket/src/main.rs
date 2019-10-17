@@ -51,7 +51,7 @@ fn main() {
                 .always_check(false)
                 .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
                 .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
-                .reaper_rate(std::time::Duration::from_secs(15))
+                .reaper_rate(std::time::Duration::from_secs(5))
                 .min_idle(1)
                 .max_size(24)
                 .build(mgr),
@@ -77,7 +77,7 @@ fn main() {
     let cfg = Config::build(Environment::Production)
         .address("localhost")
         .port(8000)
-        .workers(12)
+        .workers(24)
         .keep_alive(10)
         .expect("Failed to build Rocket Config");
 

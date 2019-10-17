@@ -120,7 +120,7 @@ pub use manager::Manager;
 #[cfg(feature = "mongodb")]
 pub use mongo_tang::{MongoManager, MongoPoolError};
 #[cfg(feature = "tokio-postgres")]
-pub use postgres_tang::{CacheStatement, PostgresManager, PostgresPoolError};
+pub use postgres_tang::{CacheStatement, PostgresManager, PostgresPoolError, PrepareStatement};
 #[cfg(feature = "redis")]
 pub use redis_tang::{RedisManager, RedisPoolError};
 #[cfg(feature = "actix-web")]
@@ -215,11 +215,11 @@ impl<M: Manager + Send> SharedPool<M> {
             .timeout(self.statics.connection_timeout)
             .await
             .map_err(|e| {
-                self.pool_lock.decr_pending(|_| true);
+                self.pool_lock.decr_pending(1);
                 e
             })?
             .map_err(|e| {
-                self.pool_lock.decr_pending(|_| true);
+                self.pool_lock.decr_pending(1);
                 e
             })?;
 
@@ -262,9 +262,7 @@ impl<M: Manager + Send> SharedPool<M> {
             self.add_connection().await.map_err(|e| {
                 // we return when an error occur so we should drop all the pending after the i.
                 // (the pending of i is already dropped in add_connection method)
-                for _ii in (i + 1)..pending_count {
-                    self.pool_lock.decr_pending(|_| true);
-                }
+                self.pool_lock.decr_pending(pending_count - i - 1);
                 e
             })?;
         }
@@ -313,7 +311,7 @@ impl<M: Manager + Send> SharedPool<M> {
 
     fn garbage_collect(&self) {
         self.pool_lock
-            .decr_pending(|pending| pending.should_remove(self.statics.connection_timeout));
+            .drop_pendings(|pending| pending.should_remove(self.statics.connection_timeout));
     }
 
     // ToDo: handle errors here.
@@ -445,7 +443,7 @@ impl<M: Manager + Send> Pool<M> {
                 }
 
                 #[cfg(feature = "actix-web")]
-                unreachable!("We should not check connections in actix-web. Since we can't spawn new connections anyway(for now).")
+                unreachable!("We should not check connections in actix-web. Since we can't spawn new connections anyway(for now). Please set always_check to false in pool builder")
             } else {
                 Ok(conn)
             }

@@ -27,7 +27,7 @@ impl<Tls> PostgresManager<Tls>
 where
     Tls: MakeTlsConnect<Socket>,
 {
-    /// Create a new `PostgresConnectionManager` with the specified `config`.
+    /// Create a new `PostgresManager` with the specified `config`.
     /// prepared statements can be passed when connecting to speed up frequent used queries.
     pub fn new(config: Config, tls: Tls) -> PostgresManager<Tls> {
         PostgresManager {
@@ -37,7 +37,7 @@ where
         }
     }
 
-    /// Create a new `PostgresConnectionManager`, parsing the config from `params`.
+    /// Create a new `PostgresManager`, parsing the config from `params`.
     pub fn new_from_stringlike<T>(params: T, tls: Tls) -> Result<PostgresManager<Tls>, Error>
     where
         T: ToString,
@@ -48,7 +48,7 @@ where
     }
 
     /// example:
-    /// ```rust
+    /// ```no_run
     /// use tokio_postgres::types::Type;
     /// use tokio_postgres::NoTls;
     /// use tang_rs::PostgresManager;

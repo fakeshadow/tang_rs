@@ -80,8 +80,10 @@ impl<M: Manager + Send> PoolInner<M> {
         }
     }
 
-    fn decr_pending_inner(&mut self) {
-        self.pending.pop_front();
+    fn decr_pending_inner(&mut self, count: u8) {
+        for _i in 0..count {
+            self.pending.pop_front();
+        }
     }
 
     fn total(&mut self) -> u8 {
@@ -122,13 +124,6 @@ impl<M: Manager + Send> PoolLock<M> {
         }
     }
 
-    fn try_pop_conn(&self) -> Option<IdleConn<M>> {
-        self.inner
-            .try_lock()
-            .ok()
-            .and_then(|mut inner| inner.conn.pop_front())
-    }
-
     // add pending directly to pool inner if we try to spawn new connections.
     // and return the new pending count as option to notify the Pool to replenish connections
     // we use closure here as it's not need to try spawn new connections every time we decr spawn count
@@ -146,14 +141,22 @@ impl<M: Manager + Send> PoolLock<M> {
         })
     }
 
-    pub(crate) fn decr_pending<F>(&self, should_drop: F)
+    #[cfg(not(feature = "actix-web"))]
+    pub(crate) fn decr_pending(&self, count: u8) {
+        self.inner.lock().unwrap().decr_pending_inner(count);
+    }
+
+    pub(crate) fn drop_pendings<F>(&self, mut should_drop: F)
     where
-        F: FnOnce(&Pending) -> bool,
+        F: FnMut(&Pending) -> bool,
     {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(pending) = inner.pending.front() {
-            if should_drop(pending) {
-                inner.decr_pending_inner();
+        let len = inner.pending.len();
+        for index in 0..len {
+            if let Some(pending) = inner.pending.get(index) {
+                if should_drop(pending) {
+                    inner.pending.remove(index);
+                }
             }
         }
     }
@@ -201,7 +204,7 @@ impl<M: Manager + Send> PoolLock<M> {
     pub(crate) fn put_back_incr_spawned(&self, conn: IdleConn<M>) {
         if let Some(waker) = {
             let mut inner = self.inner.lock().unwrap();
-            inner.decr_pending_inner();
+            inner.decr_pending_inner(1);
             if (inner.spawned as usize) < inner.conn.capacity() {
                 inner.conn.push_back(conn);
                 inner.spawned += 1;
@@ -257,55 +260,62 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
         let pool_lock = self.pool_lock;
 
         // if we get a connection we return directly
-        match pool_lock.try_pop_conn() {
-            Some(conn) => {
+        if let Ok(mut inner) = pool_lock.inner.try_lock() {
+            if let Some(conn) = inner.conn.pop_front() {
+                if let Some(wait_key) = self.wait_key {
+                    inner.waiters.remove(wait_key);
+                    self.wait_key = None;
+                }
                 self.acquired = true;
-                Poll::Ready(conn)
-            }
-            None => {
-                let mut inner = pool_lock.inner.lock().unwrap();
-
-                // a connection could returned right before we force lock the pool.
-                if let Some(conn) = inner.conn.pop_front() {
-                    self.acquired = true;
-                    return Poll::Ready(conn);
-                }
-
-                // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
-                let shared = self.shared_pool;
-                #[cfg(not(feature = "actix-web"))]
-                {
-                    if inner.total() < shared.statics.max_size {
-                        inner.incr_pending_inner(1);
-                        let shared_clone = shared.clone();
-                        let _ = shared
-                            .spawn(async move { shared_clone.add_connection().await })
-                            .map_err(|_| inner.decr_pending_inner());
-                    }
-                }
-
-                #[cfg(feature = "actix-web")]
-                let _clippy_ignore = shared;
-
-                // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
-                match self.wait_key {
-                    Some(wait_key) => {
-                        // if we are woken and have no key in waitesr then we should not be in queue anymore.
-                        if inner.waiters[wait_key].is_none() {
-                            inner.waiters_queue.insert(wait_key);
-                            inner.waiters[wait_key] = Some(cx.waker().clone());
-                        }
-                    }
-                    None => {
-                        let wait_key = inner.waiters.insert(Some(cx.waker().clone()));
-                        self.wait_key = Some(wait_key);
-                        inner.waiters_queue.insert(wait_key);
-                    }
-                }
-
-                Poll::Pending
+                return Poll::Ready(conn);
             }
         }
+
+        let mut inner = pool_lock.inner.lock().unwrap();
+
+        // a connection could returned right before we force lock the pool.
+        if let Some(conn) = inner.conn.pop_front() {
+            if let Some(wait_key) = self.wait_key {
+                inner.waiters.remove(wait_key);
+                self.wait_key = None;
+            }
+            self.acquired = true;
+            return Poll::Ready(conn);
+        }
+
+        // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
+        let shared = self.shared_pool;
+        #[cfg(not(feature = "actix-web"))]
+        {
+            if inner.total() < shared.statics.max_size {
+                inner.incr_pending_inner(1);
+                let shared_clone = shared.clone();
+                let _ = shared
+                    .spawn(async move { shared_clone.add_connection().await })
+                    .map_err(|_| inner.decr_pending_inner(1));
+            }
+        }
+
+        #[cfg(feature = "actix-web")]
+        let _clippy_ignore = shared;
+
+        // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
+        match self.wait_key {
+            Some(wait_key) => {
+                // if we are woken and have no key in waitesr then we should not be in queue anymore.
+                if inner.waiters[wait_key].is_none() {
+                    inner.waiters[wait_key] = Some(cx.waker().clone());
+                    inner.waiters_queue.insert(wait_key);
+                }
+            }
+            None => {
+                let wait_key = inner.waiters.insert(Some(cx.waker().clone()));
+                self.wait_key = Some(wait_key);
+                inner.waiters_queue.insert(wait_key);
+            }
+        }
+
+        Poll::Pending
     }
 }
 

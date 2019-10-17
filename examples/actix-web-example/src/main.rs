@@ -2,11 +2,7 @@
 extern crate serde_derive;
 
 use actix::prelude::Future as Future01;
-use actix_web::{
-    error::ErrorInternalServerError,
-    web::{self, Data},
-    App, Error, HttpResponse, HttpServer,
-};
+use actix_web::{error::ErrorInternalServerError, web, App, Error, HttpResponse, HttpServer};
 use futures_util::{FutureExt, TryFutureExt, TryStreamExt};
 use tokio_postgres::{
     types::{ToSql, Type},
@@ -20,7 +16,7 @@ async fn main() -> std::io::Result<()> {
     let db_url = "postgres://postgres:123@localhost/test";
 
     let mgr = PostgresManager::new_from_stringlike(db_url, NoTls)
-        .unwrap_or_else(|_| panic!("can't make postgres manager"))
+        .expect("can't make postgres manager")
         .prepare_statement(
             "get_topics",
             "SELECT * FROM topics WHERE id=ANY($1)",
@@ -71,7 +67,7 @@ async fn main() -> std::io::Result<()> {
     .run()
 }
 
-type MyPool = Data<Pool<PostgresManager<NoTls>>>;
+type MyPool = web::Data<Pool<PostgresManager<NoTls>>>;
 
 fn test(pool: MyPool) -> impl Future01<Item = HttpResponse, Error = Error> {
     test_async(pool).boxed_local().compat()
@@ -132,7 +128,7 @@ async fn test_async(pool: MyPool) -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().json(&t))
 }
 
-type MyRedisPool = Data<Pool<RedisManager>>;
+type MyRedisPool = web::Data<Pool<RedisManager>>;
 
 fn test_redis(pool: MyRedisPool) -> impl Future01<Item = HttpResponse, Error = Error> {
     test_redisasync(pool).boxed_local().compat()
