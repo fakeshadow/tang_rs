@@ -302,7 +302,7 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
         // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
         match self.wait_key {
             Some(wait_key) => {
-                // if we are woken and have no key in waitesr then we should not be in queue anymore.
+                // if we are woken and have no key in waiters then we should not be in queue anymore.
                 if inner.waiters[wait_key].is_none() {
                     inner.waiters[wait_key] = Some(cx.waker().clone());
                     inner.waiters_queue.insert(wait_key);

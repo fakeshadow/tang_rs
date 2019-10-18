@@ -368,11 +368,10 @@ impl<M: Manager + Send> Pool<M> {
 
     /// Run the pool with a closure.
     /// Usually slightly faster than `Pool.get()` as we only do conditional broken check according to the closure result.
-    pub async fn run<T, E, EE, F>(&self, f: F) -> Result<T, E>
+    pub async fn run<T, E, F>(&self, f: F) -> Result<T, E>
     where
-        F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output = Result<T, EE>> + Send + '_>>,
-        EE: From<M::Error>,
-        E: From<EE> + From<M::Error>,
+        F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + '_>>,
+        E: From<M::Error>,
         T: Send + 'static,
     {
         let mut conn = self.get_idle_connection(0).await?;
@@ -392,7 +391,7 @@ impl<M: Manager + Send> Pool<M> {
         } else {
             self.0.pool_lock.put_back(conn.into())
         }
-        Ok(result?)
+        result
     }
 
     // Recursive when the connection is broken(When enabling the always_check). We exit with at most 3 retries and return an error.
