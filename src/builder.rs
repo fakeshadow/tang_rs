@@ -133,9 +133,9 @@ impl Builder {
         let min_idle = self.min_idle;
         let pool = Pool::new(self, manager);
         #[cfg(feature = "default")]
-        pool.0.replenish_idle_connections(min_idle).await?;
+        pool.0.replenish_idle_conn(min_idle).await?;
         #[cfg(feature = "actix-web")]
-        pool.0.replenish_idle_connections_temp(min_idle).await?;
+        pool.0.replenish_idle_conn_temp(min_idle).await?;
 
         Ok(pool)
     }

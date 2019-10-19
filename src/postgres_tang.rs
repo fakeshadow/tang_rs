@@ -89,6 +89,7 @@ where
                 .read()
                 .expect("Failed to lock/read prepared statements")
                 .clone();
+
             let mut sts = HashMap::with_capacity(prepares.len());
             let mut futures = Vec::with_capacity(prepares.len());
 

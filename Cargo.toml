@@ -34,9 +34,6 @@ features = ["compat"]
 optional = true
 version = "0.4.0"
 
-[dependencies.slab]
-version = "0.4.2"
-
 [dependencies.tokio-executor]
 version = "=0.2.0-alpha.6"
 
