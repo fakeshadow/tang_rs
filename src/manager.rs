@@ -23,7 +23,7 @@ pub trait Manager: Send + Sync + 'static {
 #[cfg(feature = "actix-web")]
 pub trait Manager: Send + Sync + 'static {
     type Connection: Send + 'static;
-    type Error: Send + 'static + Debug + From<tokio_timer01::timeout::Error<Self::Error>>;
+    type Error: Send + 'static + Debug + From<tokio_timer01::timeout::Error<()>>;
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>>;
 

@@ -48,6 +48,7 @@ impl<M: Manager + Send> PoolInner<M> {
         }
     }
 
+    #[inline]
     fn total(&mut self) -> u8 {
         self.spawned + self.pending.len() as u8
     }

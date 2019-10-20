@@ -409,7 +409,7 @@ impl<M: Manager + Send> Pool<M> {
                 .into();
 
             #[cfg(feature = "actix-web")]
-            let conn = match Timeout::new(
+            let conn = Timeout::new(
                 shared_pool
                     .pool_lock
                     .lock(shared_pool)
@@ -419,14 +419,8 @@ impl<M: Manager + Send> Pool<M> {
                 shared_pool.statics.wait_timeout,
             )
             .compat()
-            .await
-            {
-                Ok(conn) => conn.into(),
-                Err(_e) => {
-                    retry += 1;
-                    return self.get_conn(retry).await;
-                }
-            };
+            .await?
+            .into();
 
             if shared_pool.statics.always_check {
                 #[cfg(not(feature = "actix-web"))]
@@ -443,7 +437,10 @@ impl<M: Manager + Send> Pool<M> {
                 }
 
                 #[cfg(feature = "actix-web")]
-                unreachable!("We should not check connections in actix-web. Since we can't spawn new connections anyway(for now). Please set always_check to false in pool builder")
+                {
+                    retry = 0;
+                    Ok(conn)
+                }
             } else {
                 Ok(conn)
             }
