@@ -1,3 +1,11 @@
+(October 24, 2019)
+----------------------
+
+### Add
+- `Builder::build_uninitialized` for building an empty `Pool` that can be initialized manually with `Pool::init` method.
+This enable use of `Pool` with `lazy_static`.
+
+
 (October 16, 2019)
 ----------------------
 

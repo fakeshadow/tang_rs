@@ -130,13 +130,20 @@ impl Builder {
             "min_idle must be no larger than max_size"
         );
 
-        let min_idle = self.min_idle;
         let pool = Pool::new(self, manager);
-        #[cfg(feature = "default")]
-        pool.0.replenish_idle_conn(min_idle).await?;
-        #[cfg(feature = "actix-web")]
-        pool.0.replenish_idle_conn_temp(min_idle).await?;
+        pool.init().await?;
 
         Ok(pool)
+    }
+
+    /// Consumes the `Builder`, returning a new uninitialized `Pool`.
+    /// (`Pool` have no connection and scheduled tasks like connection reaper and garbage collect)
+    pub fn build_uninitialized<M: Manager>(self, manager: M) -> Result<Pool<M>, M::Error> {
+        assert!(
+            self.max_size >= self.min_idle,
+            "min_idle must be no larger than max_size"
+        );
+
+        Ok(Pool::new(self, manager))
     }
 }

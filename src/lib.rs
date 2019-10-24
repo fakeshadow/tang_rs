@@ -12,7 +12,7 @@
 //!```no_run
 //!use std::time::Duration;
 //!
-//!use futures::TryStreamExt;
+//!use futures_util::TryStreamExt;
 //!use tang_rs::{Builder, PostgresPoolError, PostgresManager};
 //!
 //!#[tokio::main]
@@ -71,7 +71,7 @@
 //!
 //!    // use the alias input when building manager to get specific statement.
 //!    let statement = statements.get("get_topics").unwrap();
-//!    let rows = client.query(statement, &[]).await?;
+//!    let rows = client.query(statement, &[]).await.expect("Query failed");
 //!
 //!    // drop the pool ref to return connection to pool
 //!    drop(pool_ref);
@@ -342,18 +342,61 @@ impl<M: Manager + Send> Pool<M> {
     fn new(builder: Builder, manager: M) -> Self {
         let size = builder.max_size as usize;
 
-        let shared_pool = Arc::new(SharedPool {
+        Pool(Arc::new(SharedPool {
             statics: builder,
             manager,
             pool_lock: PoolLock::new(size),
-        });
+        }))
+    }
+
+    /// manually initialize pool. this is usually called when the `Pool` is built with `build_uninitialized`
+    /// This is useful when you want to make a empty `Pool` and init it later.
+    /// # example:
+    /// ```no_run
+    /// #[macro_use]
+    /// extern crate lazy_static;
+    ///
+    /// use tang_rs::{Pool, PostgresManager, Builder};
+    /// use tokio_postgres::NoTls;
+    ///
+    /// lazy_static! {
+    ///    static ref POOL: Pool<PostgresManager<NoTls>> = Builder::new()
+    ///         .always_check(false)
+    ///         .idle_timeout(None)
+    ///         .max_lifetime(None)
+    ///         .min_idle(24)
+    ///         .max_size(24)
+    ///         .build_uninitialized(
+    ///             PostgresManager::new_from_stringlike("postgres://postgres:123@localhost/test", NoTls)
+    ///                 .expect("can't make postgres manager")
+    ///         )
+    ///         .unwrap_or_else(|e| panic!("{:?}", e));
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> std::io::Result<()> {
+    ///     POOL.init().await.expect("Failed to initialize postgres pool");
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn init(&self) -> Result<(), M::Error> {
+        let shared_pool = &self.0;
 
         // spawn a loop interval future to handle the lifetime and time out of connections.
         schedule_reaping(&shared_pool);
 
         garbage_collect(&shared_pool);
 
-        Pool(shared_pool)
+        #[cfg(feature = "default")]
+        shared_pool
+            .replenish_idle_conn(shared_pool.statics.min_idle)
+            .await?;
+        #[cfg(feature = "actix-web")]
+        shared_pool
+            .replenish_idle_conn_temp(shared_pool.statics.min_idle)
+            .await?;
+
+        Ok(())
     }
 
     /// Return a reference of `Arc<SharedPool<Manager>>` and a `Option<Manager::Connection>`.
