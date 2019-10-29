@@ -15,8 +15,8 @@ name = "tang_rs"
 path = "src/lib.rs"
 
 [features]
-default = ["tokio-postgres", "redis"]
-actix-web = ["tokio-timer01", "tokio-postgres", "redis"]
+default = []
+actix-web = ["tokio-timer01"]
 
 [workspace]
 members = [

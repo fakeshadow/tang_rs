@@ -25,3 +25,4 @@ features = [ "executor" ]
 
 [dependencies.tang-rs]
 path = "../../"
+features = ["tokio-postgres", "redis"]

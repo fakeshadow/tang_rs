@@ -1,6 +1,12 @@
 (October 24, 2019)
 ----------------------
 
+### Breaking
+- default feature now doesn't include `tokio-postgres` and `redis` anymore. examples have been updated according to this change
+
+(October 24, 2019)
+----------------------
+
 ### Add
 - `Builder::build_uninitialized` for building an empty `Pool` that can be initialized manually with `Pool::init` method.
 This enable use of `Pool` with `lazy_static`.

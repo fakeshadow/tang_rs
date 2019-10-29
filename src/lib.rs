@@ -387,7 +387,7 @@ impl<M: Manager + Send> Pool<M> {
 
         garbage_collect(&shared_pool);
 
-        #[cfg(feature = "default")]
+        #[cfg(not(feature = "actix-web"))]
         shared_pool
             .replenish_idle_conn(shared_pool.statics.min_idle)
             .await?;

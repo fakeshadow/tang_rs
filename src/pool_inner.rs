@@ -252,9 +252,9 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
         }
 
         // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
-        let shared = self.shared_pool;
         #[cfg(not(feature = "actix-web"))]
         {
+            let shared = self.shared_pool;
             if inner.total() < shared.statics.max_size {
                 inner.incr_pending_inner(1);
                 let shared_clone = shared.clone();
@@ -263,9 +263,6 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
                     .map_err(|_| inner.decr_pending_inner(1));
             }
         }
-
-        #[cfg(feature = "actix-web")]
-        let _clippy_ignore = shared;
 
         // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
         match self.wait_key {
@@ -291,10 +288,10 @@ impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
 unsafe impl<M: Manager + Send> Send for PoolLock<M> {}
 
 unsafe impl<M: Manager + Send> Sync for PoolLock<M> {}
-
-unsafe impl<M: Manager + Send> Send for PoolLockFuture<'_, M> {}
-
-unsafe impl<M: Manager + Send> Sync for PoolLockFuture<'_, M> {}
+//
+//unsafe impl<M: Manager + Send> Send for PoolLockFuture<'_, M> {}
+//
+//unsafe impl<M: Manager + Send> Sync for PoolLockFuture<'_, M> {}
 
 pub struct State {
     pub connections: u8,

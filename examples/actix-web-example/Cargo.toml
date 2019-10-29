@@ -38,5 +38,4 @@ features = [ "executor" ]
 
 [dependencies.tang-rs]
 path = "../../"
-default-features = false
-features = [ "actix-web" ]
+features = ["actix-web", "tokio-postgres", "redis"]
