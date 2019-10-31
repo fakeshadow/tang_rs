@@ -21,7 +21,7 @@ version = "0.5.0-alpha.1"
 git = "https://github.com/Marwes/redis-rs"
 branch = "async_await_api"
 default-features = false
-features = [ "executor" ]
+features = [ "tokio-executor" ]
 
 [dependencies.tang-rs]
 path = "../../"

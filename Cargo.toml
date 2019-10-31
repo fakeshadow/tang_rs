@@ -35,9 +35,11 @@ optional = true
 version = "0.4.0"
 
 [dependencies.tokio-executor]
+default-features = false
 version = "=0.2.0-alpha.6"
 
 [dependencies.tokio-timer]
+default-features = false
 version = "=0.3.0-alpha.6"
 
 [dependencies.tokio-timer01]
@@ -54,8 +56,4 @@ optional = true
 git = "https://github.com/Marwes/redis-rs"
 branch = "async_await_api"
 default-features = false
-features = ["executor"]
-
-[dev-dependencies]
-tokio = "=0.2.0-alpha.6"
-lazy_static  = "1.4.0"
+features = ["tokio-executor"]

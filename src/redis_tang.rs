@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use futures_util::TryFutureExt;
-use redis::{aio::SharedConnection, Client, IntoConnectionInfo, RedisError};
+use redis::{aio::MultiplexedConnection, Client, IntoConnectionInfo, RedisError};
 
 use crate::manager::{Manager, ManagerFuture};
 use std::fmt;
@@ -22,11 +22,11 @@ impl RedisManager {
 }
 
 impl Manager for RedisManager {
-    type Connection = SharedConnection;
+    type Connection = MultiplexedConnection;
     type Error = RedisPoolError;
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
-        Box::pin(self.client.get_shared_async_connection().err_into())
+        Box::pin(self.client.get_multiplexed_async_connection().err_into())
     }
 
     fn is_valid<'a>(

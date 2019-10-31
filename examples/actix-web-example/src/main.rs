@@ -4,15 +4,15 @@ extern crate serde_derive;
 use actix::prelude::Future as Future01;
 use actix_web::{error::ErrorInternalServerError, web, App, Error, HttpResponse, HttpServer};
 use futures_util::{FutureExt, TryFutureExt, TryStreamExt};
+use once_cell::sync::Lazy;
+use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
 use tokio_postgres::{
     types::{ToSql, Type},
     NoTls, Row,
 };
 
-use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
-
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+// use once cell for a static tokio-postgres pool. so we don't have to pass the pool to App::data
+static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
     let db_url = "postgres://postgres:123@localhost/test";
 
     let mgr = PostgresManager::new_from_stringlike(db_url, NoTls)
@@ -33,15 +33,22 @@ async fn main() -> std::io::Result<()> {
         and the server has to be restart if all connections are gone broken
     */
 
-    let pool = Builder::new()
+    Builder::new()
         .always_check(false)
         .idle_timeout(None)
         .max_lifetime(None)
         .min_idle(24)
         .max_size(24)
-        .build(mgr)
+        .build_uninitialized(mgr)
+        .unwrap_or_else(|e| panic!("{:?}", e))
+});
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    // initialize tokio-postgres pool.
+    POOL.init()
         .await
-        .unwrap_or_else(|e| panic!("{:?}", e));
+        .expect("Failed to initialize tokio-postgres pool");
 
     let mgr = RedisManager::new("redis://127.0.0.1");
 
@@ -57,7 +64,6 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
-            .data(pool.clone())
             .data(pool_redis.clone())
             .service(web::resource("/test").route(web::get().to_async(test)))
             .service(web::resource("/test/redis").route(web::get().to_async(test_redis)))
@@ -67,18 +73,16 @@ async fn main() -> std::io::Result<()> {
     .run()
 }
 
-type MyPool = web::Data<Pool<PostgresManager<NoTls>>>;
-
-fn test(pool: MyPool) -> impl Future01<Item = HttpResponse, Error = Error> {
-    test_async(pool).boxed_local().compat()
+fn test() -> impl Future01<Item = HttpResponse, Error = Error> {
+    test_async().boxed_local().compat()
 }
 
-async fn test_async(pool: MyPool) -> Result<HttpResponse, Error> {
+async fn test_async() -> Result<HttpResponse, Error> {
     let ids = vec![
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];
 
-    let pool_ref = pool
+    let pool_ref = POOL
         .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;

@@ -9,7 +9,7 @@
 //! can't be used in nested runtimes.
 //!
 //! # Example:
-//!```no_run
+//!```ignore
 //!use std::time::Duration;
 //!
 //!use futures_util::TryStreamExt;
@@ -352,7 +352,7 @@ impl<M: Manager + Send> Pool<M> {
     /// manually initialize pool. this is usually called when the `Pool` is built with `build_uninitialized`
     /// This is useful when you want to make a empty `Pool` and init it later.
     /// # example:
-    /// ```no_run
+    /// ```ignore
     /// #[macro_use]
     /// extern crate lazy_static;
     ///
