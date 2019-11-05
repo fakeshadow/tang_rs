@@ -190,7 +190,7 @@ struct SharedPool<M: Manager + Send> {
 
 impl<M: Manager + Send> SharedPool<M> {
     #[cfg(not(feature = "actix-web"))]
-    async fn drop_conn(&self, _conn: Conn<M>) -> Result<(), M::Error> {
+    async fn drop_conn(&self) -> Result<(), M::Error> {
         //  We might need to spin up more connections to maintain the idle limit, e.g.
         //  if we hit connection lifetime limits
         let pending_count = self.pool_lock.decr_spawned(|total_now| {
@@ -231,30 +231,12 @@ impl<M: Manager + Send> SharedPool<M> {
 
     // we map the check result's error to drop connection then return the result.
     #[cfg(not(feature = "actix-web"))]
-    async fn check_conn(
-        &self,
-        mut conn: Conn<M>,
-        shared: &Arc<SharedPool<M>>,
-    ) -> Result<Result<Conn<M>, M::Error>, M::Error> {
-        match self
-            .manager
+    async fn check_conn(&self, conn: &mut Conn<M>) -> Result<Result<(), M::Error>, M::Error> {
+        self.manager
             .is_valid(&mut conn.conn)
             .timeout(self.statics.connection_timeout)
-            .await
-        {
-            Ok(result) => match result {
-                Err(e) => {
-                    spawn_drop(shared, conn);
-                    Ok(Err(e))
-                }
-                Ok(()) => Ok(Ok(conn)),
-            },
-
-            Err(e) => {
-                spawn_drop(shared, conn);
-                Err(e.into())
-            }
-        }
+            .await?
+            .map(Ok)
     }
 
     #[cfg(not(feature = "actix-web"))]
@@ -431,7 +413,7 @@ impl<M: Manager + Send> Pool<M> {
 
         if broken {
             #[cfg(not(feature = "actix-web"))]
-            spawn_drop(&self.0, conn);
+            spawn_drop(&self.0);
         } else {
             self.0.pool_lock.put_back(conn.into())
         }
@@ -444,7 +426,7 @@ impl<M: Manager + Send> Pool<M> {
             let shared_pool = &self.0;
 
             #[cfg(not(feature = "actix-web"))]
-            let conn = shared_pool
+            let mut conn = shared_pool
                 .pool_lock
                 .lock(shared_pool)
                 .timeout(shared_pool.statics.wait_timeout)
@@ -467,26 +449,29 @@ impl<M: Manager + Send> Pool<M> {
 
             if shared_pool.statics.always_check {
                 #[cfg(not(feature = "actix-web"))]
-                match self.0.check_conn(conn, shared_pool).await? {
-                    Ok(conn) => Ok(conn),
-                    Err(e) => {
-                        if retry > 3 {
-                            Err(e)
+                {
+                    let result = shared_pool.check_conn(&mut conn).await.map_err(|e| {
+                        spawn_drop(shared_pool);
+                        e
+                    })?;
+
+                    if let Err(e) = result {
+                        spawn_drop(shared_pool);
+                        if retry == 3 {
+                            return Err(e);
                         } else {
                             retry += 1;
-                            self.get_conn(retry).await
+                            return self.get_conn(retry).await;
                         }
                     }
                 }
-
                 #[cfg(feature = "actix-web")]
                 {
-                    retry = 0;
-                    Ok(conn)
+                    retry += 1;
                 }
-            } else {
-                Ok(conn)
-            }
+            };
+
+            Ok(conn)
         })
     }
 
@@ -550,7 +535,7 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
         let broken = self.pool.manager.is_closed(&mut conn.conn);
         if broken {
             #[cfg(not(feature = "actix-web"))]
-            spawn_drop(self.pool, conn);
+            spawn_drop(self.pool);
 
         /*  we don't drop connection when running in actix runtime  */
         } else {
@@ -560,11 +545,12 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
 }
 
 // helper function to spawn drop connection and spawn new ones if needed.
+// Conn<M> should be dropped in place where spawn_drop() is used.
 #[cfg(not(feature = "actix-web"))]
-fn spawn_drop<M: Manager + Send>(shared: &Arc<SharedPool<M>>, conn: Conn<M>) {
+fn spawn_drop<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
     let shared_clone = shared.clone();
     let _ = shared
-        .spawn(async move { shared_clone.drop_conn(conn).await })
+        .spawn(async move { shared_clone.drop_conn().await })
         .map_err(|_| shared.pool_lock.decr_spawned(|_| None));
 }
 

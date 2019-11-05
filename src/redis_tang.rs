@@ -26,7 +26,7 @@ impl Manager for RedisManager {
     type Error = RedisPoolError;
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
-        Box::pin(self.client.get_multiplexed_async_connection().err_into())
+        Box::pin(self.client.get_multiplexed_tokio_connection().err_into())
     }
 
     fn is_valid<'a>(
