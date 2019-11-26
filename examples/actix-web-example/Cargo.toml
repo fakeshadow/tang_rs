@@ -5,12 +5,13 @@ workspace = "../../"
 edition = "2018"
 publish = false
 
-[dependencies.actix]
-version = "0.8.3"
+[dependencies.actix-rt]
+default-features = false
+version = "1.0.0-alpha.1"
 
 [dependencies.actix-web]
-version = "1.0.8"
 default-features = false
+git = "https://github.com/actix/actix-web.git"
 
 [dependencies.once_cell]
 version = "1.2.0"
@@ -41,4 +42,4 @@ features = [ "tokio-executor" ]
 
 [dependencies.tang-rs]
 path = "../../"
-features = ["actix-web", "tokio-postgres", "redis"]
+features = ["tokio-postgres", "redis"]

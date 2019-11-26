@@ -3,7 +3,7 @@ use std::fmt;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -28,14 +28,14 @@ impl Pending {
 
 // PoolInner holds all the IdleConn and the waiters waiting for a connection.
 /// PoolInner is basically a reimplementation of `async_std::sync::Mutex`.
-pub(crate) struct PoolInner<M: Manager + Send> {
+pub(crate) struct PoolInner<M: Manager> {
     spawned: u8,
     pending: VecDeque<Pending>,
     conn: VecDeque<IdleConn<M>>,
     waiters: WakerList,
 }
 
-impl<M: Manager + Send> PoolInner<M> {
+impl<M: Manager> PoolInner<M> {
     fn decr_spawned_inner(&mut self) {
         if self.spawned != 0 {
             self.spawned -= 1;
@@ -60,11 +60,11 @@ impl<M: Manager + Send> PoolInner<M> {
     }
 }
 
-pub(crate) struct PoolLock<M: Manager + Send> {
+pub(crate) struct PoolLock<M: Manager> {
     inner: Mutex<PoolInner<M>>,
 }
 
-impl<M: Manager + Send> PoolLock<M> {
+impl<M: Manager> PoolLock<M> {
     pub(crate) fn new(pool_size: usize) -> Self {
         PoolLock {
             inner: Mutex::new(PoolInner {
@@ -94,16 +94,19 @@ impl<M: Manager + Send> PoolLock<M> {
     where
         F: FnOnce(u8) -> Option<u8>,
     {
-        let mut inner = self.inner.lock().unwrap();
-        inner.decr_spawned_inner();
+        self.inner
+            .lock()
+            .map(|mut inner| {
+                inner.decr_spawned_inner();
 
-        try_spawn(inner.total()).map(|pending_new| {
-            inner.incr_pending_inner(pending_new);
-            pending_new
-        })
+                try_spawn(inner.total()).map(|pending_new| {
+                    inner.incr_pending_inner(pending_new);
+                    pending_new
+                })
+            })
+            .expect("Lock poisoned when decrementing spawned count")
     }
 
-    #[cfg(not(feature = "actix-web"))]
     pub(crate) fn decr_pending(&self, count: u8) {
         self.inner.lock().unwrap().decr_pending_inner(count);
     }
@@ -114,6 +117,7 @@ impl<M: Manager + Send> PoolLock<M> {
     {
         let mut inner = self.inner.lock().unwrap();
         let len = inner.pending.len();
+
         for index in 0..len {
             if let Some(pending) = inner.pending.get(index) {
                 if should_drop(pending) {
@@ -156,19 +160,18 @@ impl<M: Manager + Send> PoolLock<M> {
     pub(crate) fn put_back(&self, conn: IdleConn<M>) {
         self.inner
             .lock()
-            .ok()
-            .and_then(|mut inner| {
+            .map(|mut inner| {
                 inner.conn.push_back(conn);
                 inner.waiters.wake_one_weak()
             })
+            .expect("Lock poisoned when putting back connection")
             .wake();
     }
 
     pub(crate) fn put_back_incr_spawned(&self, conn: IdleConn<M>) {
         self.inner
             .lock()
-            .ok()
-            .and_then(|mut inner| {
+            .map(|mut inner| {
                 inner.decr_pending_inner(1);
                 if (inner.spawned as usize) < inner.conn.capacity() {
                     inner.conn.push_back(conn);
@@ -176,114 +179,119 @@ impl<M: Manager + Send> PoolLock<M> {
                 }
                 inner.waiters.wake_one_weak()
             })
+            .expect("Lock poisoned when putting back connection")
             .wake();
     }
 
     pub(crate) fn state(&self) -> State {
-        let inner = self.inner.lock().unwrap();
-        State {
-            connections: inner.spawned,
-            idle_connections: inner.conn.len() as u8,
-            pending_connections: inner.pending.iter().cloned().collect(),
-        }
+        self.inner
+            .lock()
+            .map(|inner| State {
+                connections: inner.spawned,
+                idle_connections: inner.conn.len() as u8,
+                pending_connections: inner.pending.iter().cloned().collect(),
+            })
+            .unwrap()
     }
 }
 
 // `PoolLockFuture` return a future of `IdleConn`. In the `Future` we pass it's `Waker` to `PoolLock`.
 // Then when a `IdleConn` is returned to pool we lock the `PoolLock` and wake the `Wakers` inside it to notify other `PoolLockFuture` it's time to continue.
-pub(crate) struct PoolLockFuture<'a, M: Manager + Send> {
+pub(crate) struct PoolLockFuture<'a, M: Manager> {
     shared_pool: &'a Arc<SharedPool<M>>,
     pool_lock: &'a PoolLock<M>,
     wait_key: Option<NonZeroUsize>,
     acquired: bool,
 }
 
-impl<M: Manager + Send> Drop for PoolLockFuture<'_, M> {
+impl<M: Manager> Drop for PoolLockFuture<'_, M> {
     #[inline]
     fn drop(&mut self) {
         if let Some(wait_key) = self.wait_key {
-            self.pool_lock
-                .inner
-                .lock()
-                .ok()
-                .and_then(|mut inner| {
-                    let wait_key = unsafe { inner.waiters.remove(wait_key) };
-
-                    if wait_key.is_none() && !self.acquired {
-                        // We were awoken but didn't acquire the lock. Wake up another task.
-                        inner.waiters.wake_one_weak()
-                    } else {
-                        None
-                    }
-                })
-                .wake();
+            self.wake_cold(wait_key);
         }
     }
 }
 
-impl<M: Manager + Send> Future for PoolLockFuture<'_, M> {
+impl<M: Manager> PoolLockFuture<'_, M> {
+    #[inline]
+    fn poll_idle_conn(&mut self, inner: &mut MutexGuard<'_, PoolInner<M>>) -> Poll<IdleConn<M>> {
+        match inner.conn.pop_front() {
+            Some(conn) => {
+                self.acquired = true;
+                Poll::Ready(conn)
+            }
+            None => Poll::Pending,
+        }
+    }
+
+    #[inline]
+    fn spawn_idle_conn(&self, inner: &mut MutexGuard<'_, PoolInner<M>>) {
+        let shared = self.shared_pool;
+        if inner.total() < shared.statics.max_size {
+            inner.incr_pending_inner(1);
+            let shared_clone = shared.clone();
+            shared
+                .spawn(async move { shared_clone.add_idle_conn().await })
+                .unwrap_or_else(|_| inner.decr_pending_inner(1));
+        }
+    }
+
+    #[cold]
+    fn wake_cold(&self, wait_key: NonZeroUsize) {
+        let mut inner = self.pool_lock.inner.lock().unwrap();
+        let wait_key = unsafe { inner.waiters.remove(wait_key) };
+
+        if wait_key.is_none() && !self.acquired {
+            // We were awoken but didn't acquire the lock. Wake up another task.
+            let opt = inner.waiters.wake_one_weak();
+            drop(inner);
+            opt.wake();
+        }
+    }
+}
+
+impl<M: Manager> Future for PoolLockFuture<'_, M> {
     type Output = IdleConn<M>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let pool_lock = self.pool_lock;
+        let mut inner = self.pool_lock.inner.lock().unwrap();
 
-        // if we get a connection we return directly
-        if let Ok(mut inner) = pool_lock.inner.try_lock() {
-            if let Some(conn) = inner.conn.pop_front() {
-                if let Some(wait_key) = self.wait_key {
-                    unsafe { inner.waiters.remove(wait_key) };
-                    self.wait_key = None;
-                }
-                self.acquired = true;
-                return Poll::Ready(conn);
-            }
-        }
-
-        let mut inner = pool_lock.inner.lock().unwrap();
-
-        // a connection could returned right before we force lock the pool.
-        if let Some(conn) = inner.conn.pop_front() {
-            if let Some(wait_key) = self.wait_key {
-                unsafe { inner.waiters.remove(wait_key) };
-                self.wait_key = None;
-            }
-            self.acquired = true;
-            return Poll::Ready(conn);
-        }
-
-        // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
-        #[cfg(not(feature = "actix-web"))]
-        {
-            let shared = self.shared_pool;
-            if inner.total() < shared.statics.max_size {
-                inner.incr_pending_inner(1);
-                let shared_clone = shared.clone();
-                let _ = shared
-                    .spawn(async move { shared_clone.add_idle_conn().await })
-                    .map_err(|_| inner.decr_pending_inner(1));
-            }
-        }
-        #[cfg(feature = "actix-web")]
-        let _a = self.shared_pool;
+        // poll a connection and use the result to mutate PoolLockFuture state as well as PoolInner state.
+        let poll = self.poll_idle_conn(&mut inner);
 
         // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
         match self.wait_key {
             Some(wait_key) => {
-                // if we are woken and have no key in waiters then we should not be in queue anymore.
-                let opt = unsafe { inner.waiters.get(wait_key) };
-                if opt.is_none() {
-                    let waker = cx.waker().clone();
-                    *opt = Some(waker);
+                if poll.is_ready() {
+                    // we got poll ready therefore remove self wait_key
+                    unsafe { inner.waiters.remove(wait_key) };
+                    self.wait_key = None;
+                } else {
+                    // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
+                    self.spawn_idle_conn(&mut inner);
+
+                    // if we are woken and have no key in waiters then we should not be in queue anymore.
+                    let opt = unsafe { inner.waiters.get(wait_key) };
+                    if opt.is_none() {
+                        let waker = cx.waker().clone();
+                        *opt = Some(waker);
+                    }
                 }
             }
             None => {
-                let waker = cx.waker().clone();
-                let wait_key = inner.waiters.insert(Some(waker));
-                self.wait_key = Some(wait_key);
+                if poll.is_pending() {
+                    // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
+                    self.spawn_idle_conn(&mut inner);
+
+                    let waker = cx.waker().clone();
+                    let wait_key = inner.waiters.insert(Some(waker));
+                    self.wait_key = Some(wait_key);
+                }
             }
         }
 
-        Poll::Pending
+        poll
     }
 }
 

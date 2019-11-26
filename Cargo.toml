@@ -16,7 +16,6 @@ path = "src/lib.rs"
 
 [features]
 default = []
-actix-web = ["tokio-timer01"]
 
 [workspace]
 members = [
@@ -28,7 +27,6 @@ members = [
 [dependencies.futures-util-preview]
 version = "=0.3.0-alpha.19"
 default-features = false
-features = ["compat"]
 
 [dependencies.mongodb]
 optional = true
@@ -41,11 +39,6 @@ version = "=0.2.0-alpha.6"
 [dependencies.tokio-timer]
 default-features = false
 version = "=0.3.0-alpha.6"
-
-[dependencies.tokio-timer01]
-package= "tokio-timer"
-version = "=0.2.11"
-optional = true
 
 [dependencies.tokio-postgres]
 optional = true

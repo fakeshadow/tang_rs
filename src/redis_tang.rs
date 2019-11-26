@@ -70,16 +70,8 @@ impl From<RedisError> for RedisPoolError {
     }
 }
 
-#[cfg(not(feature = "actix-web"))]
 impl From<tokio_timer::timeout::Elapsed> for RedisPoolError {
     fn from(_e: tokio_timer::timeout::Elapsed) -> RedisPoolError {
-        RedisPoolError::TimeOut
-    }
-}
-
-#[cfg(feature = "actix-web")]
-impl<T> From<tokio_timer01::timeout::Error<T>> for RedisPoolError {
-    fn from(_e: tokio_timer01::timeout::Error<T>) -> RedisPoolError {
         RedisPoolError::TimeOut
     }
 }

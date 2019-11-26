@@ -277,16 +277,8 @@ impl From<Error> for PostgresPoolError {
     }
 }
 
-#[cfg(not(feature = "actix-web"))]
 impl From<tokio_timer::timeout::Elapsed> for PostgresPoolError {
     fn from(_e: tokio_timer::timeout::Elapsed) -> PostgresPoolError {
-        PostgresPoolError::TimeOut
-    }
-}
-
-#[cfg(feature = "actix-web")]
-impl<T> From<tokio_timer01::timeout::Error<T>> for PostgresPoolError {
-    fn from(_e: tokio_timer01::timeout::Error<T>) -> PostgresPoolError {
         PostgresPoolError::TimeOut
     }
 }

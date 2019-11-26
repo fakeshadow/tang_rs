@@ -1,15 +1,17 @@
 #[macro_use]
 extern crate serde_derive;
 
-use actix::prelude::Future as Future01;
-use actix_web::{error::ErrorInternalServerError, web, App, Error, HttpResponse, HttpServer};
-use futures_util::{FutureExt, TryFutureExt, TryStreamExt};
+use actix_web::{
+    error::ErrorInternalServerError, web, App, Error, HttpResponse, HttpServer,
+};
+use futures_util::TryStreamExt;
 use once_cell::sync::Lazy;
-use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
 use tokio_postgres::{
     types::{ToSql, Type},
     NoTls, Row,
 };
+
+use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
 
 // use once cell for a static tokio-postgres pool. so we don't have to pass the pool to App::data
 static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
@@ -24,60 +26,46 @@ static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
         )
         .prepare_statement("get_users", "SELECT * FROM posts WHERE id=ANY($1)", &[]);
 
-    /*
-        Limitation:
-
-        actix-web still runs on tokio 0.1 under the hood. so spawning new connection won't work.
-        so it best to set idle_timeout and max_lifetime both to None.
-        min_idle equals to max_size.
-        and the server has to be restart if all connections are gone broken
-    */
-
     Builder::new()
         .always_check(false)
         .idle_timeout(None)
         .max_lifetime(None)
-        .min_idle(24)
+        .min_idle(1)
         .max_size(24)
         .build_uninitialized(mgr)
         .unwrap_or_else(|e| panic!("{:?}", e))
 });
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<()> {
+    let mut sys = actix_rt::System::new("test pool");
+
     // initialize tokio-postgres pool.
-    POOL.init()
-        .await
-        .expect("Failed to initialize tokio-postgres pool");
+    sys.block_on(POOL.init()).expect("Failed to initialize tokio-postgres pool");
 
     let mgr = RedisManager::new("redis://127.0.0.1");
-
     let pool_redis = Builder::new()
         .always_check(false)
         .idle_timeout(None)
         .max_lifetime(None)
-        .min_idle(24)
+        .min_idle(1)
         .max_size(24)
-        .build(mgr)
-        .await
-        .unwrap_or_else(|_| panic!("can't make redis pool"));
+        .build(mgr);
+
+    let pool_redis = sys.block_on(pool_redis).expect("Failed to initialize redis pool");
 
     HttpServer::new(move || {
         App::new()
             .data(pool_redis.clone())
-            .service(web::resource("/test").route(web::get().to_async(test)))
-            .service(web::resource("/test/redis").route(web::get().to_async(test_redis)))
+            .service(web::resource("/test").route(web::get().to(test)))
+            .service(web::resource("/test/redis").route(web::get().to(test_redis)))
     })
-    .bind("localhost:8000")
-    .unwrap()
-    .run()
+    .bind("localhost:8000")?
+    .start();
+
+    sys.run()
 }
 
-fn test() -> impl Future01<Item = HttpResponse, Error = Error> {
-    test_async().boxed_local().compat()
-}
-
-async fn test_async() -> Result<HttpResponse, Error> {
+async fn test() -> Result<HttpResponse, Error> {
     let ids = vec![
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];
@@ -132,13 +120,7 @@ async fn test_async() -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().json(&t))
 }
 
-type MyRedisPool = web::Data<Pool<RedisManager>>;
-
-fn test_redis(pool: MyRedisPool) -> impl Future01<Item = HttpResponse, Error = Error> {
-    test_redisasync(pool).boxed_local().compat()
-}
-
-async fn test_redisasync(pool: MyRedisPool) -> Result<HttpResponse, Error> {
+async fn test_redis(pool: web::Data<Pool<RedisManager>>) -> Result<HttpResponse, Error> {
     let mut client = pool
         .get()
         .await

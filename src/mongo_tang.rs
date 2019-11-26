@@ -83,16 +83,8 @@ impl From<Error> for MongoPoolError {
     }
 }
 
-#[cfg(not(feature = "actix-web"))]
 impl From<tokio_timer::timeout::Elapsed> for MongoPoolError {
     fn from(_e: tokio_timer::timeout::Elapsed) -> MongoPoolError {
-        MongoPoolError::TimeOut
-    }
-}
-
-#[cfg(feature = "actix-web")]
-impl<T> From<tokio_timer01::timeout::Error<T>> for MongoPoolError {
-    fn from(_e: tokio_timer01::timeout::Error<T>) -> MongoPoolError {
         MongoPoolError::TimeOut
     }
 }

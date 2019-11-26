@@ -111,9 +111,7 @@ use std::time::Instant;
 
 use futures_util::FutureExt;
 use tokio_executor::{DefaultExecutor, Executor};
-use tokio_timer::Interval;
-#[cfg(not(feature = "actix-web"))]
-use tokio_timer::Timeout;
+use tokio_timer::{Interval, Timeout};
 
 pub use builder::Builder;
 pub use manager::Manager;
@@ -123,11 +121,6 @@ pub use mongo_tang::{MongoManager, MongoPoolError};
 pub use postgres_tang::{CacheStatement, PostgresManager, PostgresPoolError, PrepareStatement};
 #[cfg(feature = "redis")]
 pub use redis_tang::{RedisManager, RedisPoolError};
-#[cfg(feature = "actix-web")]
-use {
-    futures_util::{compat::Future01CompatExt, TryFutureExt},
-    tokio_timer01::Timeout,
-};
 
 use crate::manager::ManagerFuture;
 use crate::pool_inner::{PoolLock, State};
@@ -189,7 +182,6 @@ struct SharedPool<M: Manager + Send> {
 }
 
 impl<M: Manager + Send> SharedPool<M> {
-    #[cfg(not(feature = "actix-web"))]
     async fn drop_conn(&self) -> Result<(), M::Error> {
         //  We might need to spin up more connections to maintain the idle limit, e.g.
         //  if we hit connection lifetime limits
@@ -208,7 +200,6 @@ impl<M: Manager + Send> SharedPool<M> {
     }
 
     // use `Builder`'s connection_timeout setting to cancel the `connect` method and return error.
-    #[cfg(not(feature = "actix-web"))]
     async fn add_idle_conn(&self) -> Result<(), M::Error> {
         let conn = self
             .manager
@@ -229,8 +220,6 @@ impl<M: Manager + Send> SharedPool<M> {
         Ok(())
     }
 
-    // we map the check result's error to drop connection then return the result.
-    #[cfg(not(feature = "actix-web"))]
     async fn check_conn(&self, conn: &mut Conn<M>) -> Result<Result<(), M::Error>, M::Error> {
         self.manager
             .is_valid(&mut conn.conn)
@@ -239,7 +228,6 @@ impl<M: Manager + Send> SharedPool<M> {
             .map(Ok)
     }
 
-    #[cfg(not(feature = "actix-web"))]
     async fn replenish_idle_conn(&self, pending_count: u8) -> Result<(), M::Error> {
         for i in 0..pending_count {
             self.add_idle_conn().await.map_err(|e| {
@@ -249,18 +237,6 @@ impl<M: Manager + Send> SharedPool<M> {
                 e
             })?;
         }
-        Ok(())
-    }
-
-    // only used to spawn connections when starting the pool
-    #[cfg(feature = "actix-web")]
-    async fn replenish_idle_conn_temp(&self, pending_count: u8) -> Result<(), M::Error> {
-        for _i in 0..pending_count {
-            let conn = self.manager.connect().await?;
-
-            self.pool_lock.put_back_incr_spawned(IdleConn::new(conn));
-        }
-
         Ok(())
     }
 
@@ -280,15 +256,9 @@ impl<M: Manager + Send> SharedPool<M> {
                 should_drop
             });
 
-        #[cfg(not(feature = "actix-web"))]
         match pending_new {
             Some(pending_new) => self.replenish_idle_conn(pending_new).await,
             None => Ok(()),
-        }
-        #[cfg(feature = "actix-web")]
-        {
-            let _ = pending_new;
-            Ok(())
         }
     }
 
@@ -298,9 +268,10 @@ impl<M: Manager + Send> SharedPool<M> {
     }
 
     // ToDo: handle errors here.
-    fn spawn<F, R>(&self, f: F) -> Result<(), tokio_executor::SpawnError>
+    fn spawn<F>(&self, f: F) -> Result<(), tokio_executor::SpawnError>
     where
-        F: Future<Output = R> + Send + 'static,
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
     {
         DefaultExecutor::current().spawn(Box::pin(f.map(|_| ())))
     }
@@ -364,18 +335,11 @@ impl<M: Manager + Send> Pool<M> {
     pub async fn init(&self) -> Result<(), M::Error> {
         let shared_pool = &self.0;
 
-        // spawn a loop interval future to handle the lifetime and time out of connections.
-        schedule_reaping(&shared_pool);
+        schedule_reaping(shared_pool);
+        garbage_collect(shared_pool);
 
-        garbage_collect(&shared_pool);
-
-        #[cfg(not(feature = "actix-web"))]
         shared_pool
             .replenish_idle_conn(shared_pool.statics.min_idle)
-            .await?;
-        #[cfg(feature = "actix-web")]
-        shared_pool
-            .replenish_idle_conn_temp(shared_pool.statics.min_idle)
             .await?;
 
         Ok(())
@@ -412,7 +376,6 @@ impl<M: Manager + Send> Pool<M> {
         };
 
         if broken {
-            #[cfg(not(feature = "actix-web"))]
             spawn_drop(&self.0);
         } else {
             self.0.pool_lock.put_back(conn.into())
@@ -425,7 +388,6 @@ impl<M: Manager + Send> Pool<M> {
         Box::pin(async move {
             let shared_pool = &self.0;
 
-            #[cfg(not(feature = "actix-web"))]
             let mut conn = shared_pool
                 .pool_lock
                 .lock(shared_pool)
@@ -433,41 +395,20 @@ impl<M: Manager + Send> Pool<M> {
                 .await?
                 .into();
 
-            #[cfg(feature = "actix-web")]
-            let conn = Timeout::new(
-                shared_pool
-                    .pool_lock
-                    .lock(shared_pool)
-                    .boxed()
-                    .unit_error()
-                    .compat(),
-                shared_pool.statics.wait_timeout,
-            )
-            .compat()
-            .await?
-            .into();
-
             if shared_pool.statics.always_check {
-                #[cfg(not(feature = "actix-web"))]
-                {
-                    let result = shared_pool.check_conn(&mut conn).await.map_err(|e| {
-                        spawn_drop(shared_pool);
-                        e
-                    })?;
+                let result = shared_pool.check_conn(&mut conn).await.map_err(|e| {
+                    spawn_drop(shared_pool);
+                    e
+                })?;
 
-                    if let Err(e) = result {
-                        spawn_drop(shared_pool);
-                        if retry == 3 {
-                            return Err(e);
-                        } else {
-                            retry += 1;
-                            return self.get_conn(retry).await;
-                        }
+                if let Err(e) = result {
+                    spawn_drop(shared_pool);
+                    if retry == 3 {
+                        return Err(e);
+                    } else {
+                        retry += 1;
+                        return self.get_conn(retry).await;
                     }
-                }
-                #[cfg(feature = "actix-web")]
-                {
-                    retry += 1;
                 }
             };
 
@@ -534,10 +475,7 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
 
         let broken = self.pool.manager.is_closed(&mut conn.conn);
         if broken {
-            #[cfg(not(feature = "actix-web"))]
             spawn_drop(self.pool);
-
-        /*  we don't drop connection when running in actix runtime  */
         } else {
             self.pool.pool_lock.put_back(conn.into());
         };
@@ -546,45 +484,44 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
 
 // helper function to spawn drop connection and spawn new ones if needed.
 // Conn<M> should be dropped in place where spawn_drop() is used.
-#[cfg(not(feature = "actix-web"))]
 fn spawn_drop<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
     let shared_clone = shared.clone();
-    let _ = shared
+    shared
         .spawn(async move { shared_clone.drop_conn().await })
-        .map_err(|_| shared.pool_lock.decr_spawned(|_| None));
+        .unwrap_or_else(|_| {
+            shared.pool_lock.decr_spawned(|_| None);
+        });
 }
 
 // schedule reaping runs in a spawned future.
-fn schedule_reaping<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
-    if shared.statics.max_lifetime.is_some() || shared.statics.idle_timeout.is_some() {
-        let mut interval = Interval::new_interval(shared.statics.reaper_rate);
-        let shared_clone = shared.clone();
-
-        let _ = shared
-            .spawn(async move {
-                loop {
-                    let _i = interval.next().await;
-                    let _ = shared_clone.reap_idle_conn().await;
-                }
-            })
-            .map_err(|e| panic!("{}", e));
+fn schedule_reaping<M: Manager + Send>(shared_pool: &Arc<SharedPool<M>>) {
+    let statics = &shared_pool.statics;
+    if statics.max_lifetime.is_some() || statics.idle_timeout.is_some() {
+        let shared_clone = shared_pool.clone();
+        let mut interval = Interval::new_interval(statics.reaper_rate);
+        let fut = async move {
+            loop {
+                let _i = interval.next().await;
+                let _ = shared_clone.reap_idle_conn().await;
+            }
+        };
+        shared_pool.spawn(fut).unwrap_or_else(|e| panic!("{}", e));
     }
 }
 
 // schedule garbage collection runs in a spawned future.
-fn garbage_collect<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
-    if shared.statics.use_gc {
-        let mut interval = Interval::new_interval(shared.statics.reaper_rate * 6);
-        let shared_clone = shared.clone();
-
-        let _ = shared
-            .spawn(async move {
-                loop {
-                    let _i = interval.next().await;
-                    shared_clone.garbage_collect();
-                }
-            })
-            .map_err(|e| panic!("{}", e));
+fn garbage_collect<M: Manager + Send>(shared_pool: &Arc<SharedPool<M>>) {
+    let statics = &shared_pool.statics;
+    if statics.use_gc {
+        let shared_clone = shared_pool.clone();
+        let mut interval = Interval::new_interval(statics.reaper_rate * 6);
+        let fut = async move {
+            loop {
+                let _i = interval.next().await;
+                let _ = shared_clone.garbage_collect();
+            }
+        };
+        shared_pool.spawn(fut).unwrap_or_else(|e| panic!("{}", e));
     }
 }
 
