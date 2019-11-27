@@ -5,12 +5,18 @@ workspace = "../../"
 edition = "2018"
 publish = false
 
+[dependencies.futures-util]
+version = "=0.3.1"
+
+[dependencies.redis]
+git = "https://github.com/Marwes/redis-rs"
+branch = "async_await_api"
+default-features = false
+features = ["tokio-rt-core"]
+
 [dependencies.rocket]
 git = "https://github.com/SergioBenitez/Rocket"
 branch = "async"
-
-[dependencies.serde_json]
-version = "1.0.40"
 
 [dependencies.serde]
 version = "1.0.101"
@@ -19,24 +25,17 @@ default-features = false
 [dependencies.serde_derive]
 version = "1.0.101"
 
-[dependencies.tokio]
-version = "=0.2.0-alpha.6"
-default-features = false
-features = [ "io", "codec", "fs" ]
-
-[dependencies.futures-preview]
-version = "=0.3.0-alpha.19"
-features = [ "compat", "async-await" ]
-
-[dependencies.tokio-postgres]
-version = "0.5.0-alpha.1"
-
-[dependencies.redis]
-git = "https://github.com/Marwes/redis-rs"
-branch = "async_await_api"
-default-features = false
-features = [ "tokio-executor" ]
+[dependencies.serde_json]
+version = "1.0.40"
 
 [dependencies.tang-rs]
 path = "../../"
 features = ["tokio-postgres", "redis"]
+
+[dependencies.tokio]
+version = "=0.2.1"
+features = ["full"]
+
+[dependencies.tokio-postgres]
+git = "https://github.com/sfackler/rust-postgres"
+

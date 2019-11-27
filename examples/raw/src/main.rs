@@ -35,7 +35,7 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or_else(|_| panic!("can't make pool"));
 
     // wait a bit as the pool spawn connections asynchronously
-    tokio::timer::delay(std::time::Instant::now() + std::time::Duration::from_secs(1)).await;
+    tokio::time::delay_for(std::time::Duration::from_secs(1)).await;
 
     // run pool in closure. it's slightly faster than pool.get().
     let _rows = pool

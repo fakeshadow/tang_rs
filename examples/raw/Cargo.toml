@@ -5,24 +5,19 @@ workspace = "../../"
 edition = "2018"
 publish = false
 
-[dependencies.futures-preview]
-version = "=0.3.0-alpha.19"
-features = [ "async-await" ]
-
-[dependencies.tokio]
-version = "=0.2.0-alpha.6"
-default-features = false
-features = [ "io", "codec", "fs" ]
-
-[dependencies.tokio-postgres]
-version = "0.5.0-alpha.1"
-
 [dependencies.redis]
 git = "https://github.com/Marwes/redis-rs"
 branch = "async_await_api"
 default-features = false
-features = [ "tokio-executor" ]
+features = ["tokio-rt-core"]
 
 [dependencies.tang-rs]
 path = "../../"
 features = ["tokio-postgres", "redis"]
+
+[dependencies.tokio]
+version = "=0.2.1"
+features = ["full"]
+
+[dependencies.tokio-postgres]
+git = "https://github.com/sfackler/rust-postgres"

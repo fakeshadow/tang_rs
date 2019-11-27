@@ -19,34 +19,30 @@ default = []
 
 [workspace]
 members = [
-  "examples/actix-web-example",
-  "examples/rocket",
+#  "examples/actix-web-example",
+#  "examples/rocket",
   "examples/raw",
 ]
 
-[dependencies.futures-util-preview]
-version = "=0.3.0-alpha.19"
+[dependencies.futures-util]
+version = "0.3.1"
 default-features = false
 
 [dependencies.mongodb]
 optional = true
 version = "0.4.0"
 
-[dependencies.tokio-executor]
-default-features = false
-version = "=0.2.0-alpha.6"
-
-[dependencies.tokio-timer]
-default-features = false
-version = "=0.3.0-alpha.6"
+[dependencies.tokio]
+version = "=0.2.1"
+features = ["rt-core", "time"]
 
 [dependencies.tokio-postgres]
 optional = true
-version = "0.5.0-alpha.1"
+git = "https://github.com/sfackler/rust-postgres"
 
 [dependencies.redis]
 optional = true
 git = "https://github.com/Marwes/redis-rs"
 branch = "async_await_api"
 default-features = false
-features = ["tokio-executor"]
+features = ["tokio-rt-core"]

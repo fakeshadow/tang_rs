@@ -70,8 +70,8 @@ impl From<RedisError> for RedisPoolError {
     }
 }
 
-impl From<tokio_timer::timeout::Elapsed> for RedisPoolError {
-    fn from(_e: tokio_timer::timeout::Elapsed) -> RedisPoolError {
+impl From<tokio::time::Elapsed> for RedisPoolError {
+    fn from(_e: tokio::time::Elapsed) -> RedisPoolError {
         RedisPoolError::TimeOut
     }
 }

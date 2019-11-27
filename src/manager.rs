@@ -7,7 +7,7 @@ pub(crate) type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + '
 /// trait come from bb8.
 pub trait Manager: Send + Sync + 'static {
     type Connection: Send + 'static;
-    type Error: Send + 'static + Debug + From<tokio_timer::timeout::Elapsed>;
+    type Error: Send + 'static + Debug + From<tokio::time::Elapsed>;
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>>;
 

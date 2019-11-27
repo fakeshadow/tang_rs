@@ -2,7 +2,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-use mongodb::{db::ThreadedDatabase, Client, Error, ThreadedClient};
+use mongodb::{Client, Error, ThreadedClient};
 
 use crate::manager::{Manager, ManagerFuture};
 
@@ -42,7 +42,7 @@ impl Manager for MongoManager {
         })
     }
 
-    fn is_closed(&self, conn: &mut Self::Connection) -> bool {
+    fn is_closed(&self, _conn: &mut Self::Connection) -> bool {
         false
     }
 }
@@ -83,8 +83,8 @@ impl From<Error> for MongoPoolError {
     }
 }
 
-impl From<tokio_timer::timeout::Elapsed> for MongoPoolError {
-    fn from(_e: tokio_timer::timeout::Elapsed) -> MongoPoolError {
+impl From<tokio::time::Elapsed> for MongoPoolError {
+    fn from(_e: tokio::time::Elapsed) -> MongoPoolError {
         MongoPoolError::TimeOut
     }
 }

@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::RwLock;
 use std::{fmt, str::FromStr};
 
-use futures_util::{FutureExt, TryFutureExt};
+use futures_util::{FutureExt, TryFutureExt, future::join_all};
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
     types::Type,
@@ -82,7 +82,7 @@ where
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
         Box::pin(async move {
             let (c, conn) = self.config.connect(self.tls.clone()).await?;
-            tokio_executor::spawn(conn.map(|_| ()));
+            tokio::spawn(conn.map(|_| ()));
 
             let prepares = self
                 .prepares
@@ -101,7 +101,7 @@ where
                 futures.push(future);
             }
 
-            for result in futures_util::future::join_all(futures).await.into_iter() {
+            for result in join_all(futures).await.into_iter() {
                 let (alias, st) = result?;
                 sts.insert(alias, st);
             }
@@ -179,7 +179,7 @@ where
                 }
             }
 
-            for result in futures_util::future::join_all(futures).await.into_iter() {
+            for result in join_all(futures).await.into_iter() {
                 let (alias, st) = result?;
                 sts.insert(alias, st);
             }
@@ -277,8 +277,8 @@ impl From<Error> for PostgresPoolError {
     }
 }
 
-impl From<tokio_timer::timeout::Elapsed> for PostgresPoolError {
-    fn from(_e: tokio_timer::timeout::Elapsed) -> PostgresPoolError {
+impl From<tokio::time::Elapsed> for PostgresPoolError {
+    fn from(_e: tokio::time::Elapsed) -> PostgresPoolError {
         PostgresPoolError::TimeOut
     }
 }

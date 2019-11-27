@@ -18,7 +18,7 @@ use tokio_postgres::{
     Row,
 };
 
-use futures::TryStreamExt;
+use futures_util::TryStreamExt;
 use tang_rs::{Builder, Pool, PostgresManager, PostgresPoolError, RedisManager, RedisPoolError};
 
 // dummy data

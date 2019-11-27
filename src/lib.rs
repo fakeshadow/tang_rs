@@ -109,9 +109,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures_util::FutureExt;
-use tokio_executor::{DefaultExecutor, Executor};
-use tokio_timer::{Interval, Timeout};
+use tokio::time::{interval, timeout, Timeout};
 
 pub use builder::Builder;
 pub use manager::Manager;
@@ -267,13 +265,13 @@ impl<M: Manager + Send> SharedPool<M> {
             .drop_pendings(|pending| pending.should_remove(self.statics.connection_timeout));
     }
 
-    // ToDo: handle errors here.
-    fn spawn<F>(&self, f: F) -> Result<(), tokio_executor::SpawnError>
+    // ToDo: we should figure a way to handle failed spawn.
+    fn spawn<F>(&self, f: F)
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        DefaultExecutor::current().spawn(Box::pin(f.map(|_| ())))
+        tokio::spawn(f);
     }
 }
 
@@ -487,10 +485,10 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
 fn spawn_drop<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
     let shared_clone = shared.clone();
     shared
-        .spawn(async move { shared_clone.drop_conn().await })
-        .unwrap_or_else(|_| {
-            shared.pool_lock.decr_spawned(|_| None);
-        });
+        .spawn(async move { shared_clone.drop_conn().await });
+//        .unwrap_or_else(|_| {
+//            shared.pool_lock.decr_spawned(|_| None);
+//        });
 }
 
 // schedule reaping runs in a spawned future.
@@ -498,14 +496,15 @@ fn schedule_reaping<M: Manager + Send>(shared_pool: &Arc<SharedPool<M>>) {
     let statics = &shared_pool.statics;
     if statics.max_lifetime.is_some() || statics.idle_timeout.is_some() {
         let shared_clone = shared_pool.clone();
-        let mut interval = Interval::new_interval(statics.reaper_rate);
+        let mut interval = interval(statics.reaper_rate);
         let fut = async move {
             loop {
-                let _i = interval.next().await;
+                let _i = interval.tick().await;
                 let _ = shared_clone.reap_idle_conn().await;
             }
         };
-        shared_pool.spawn(fut).unwrap_or_else(|e| panic!("{}", e));
+        shared_pool.spawn(fut);
+//            .unwrap_or_else(|e| panic!("{}", e));
     }
 }
 
@@ -514,21 +513,22 @@ fn garbage_collect<M: Manager + Send>(shared_pool: &Arc<SharedPool<M>>) {
     let statics = &shared_pool.statics;
     if statics.use_gc {
         let shared_clone = shared_pool.clone();
-        let mut interval = Interval::new_interval(statics.reaper_rate * 6);
+        let mut interval = interval(statics.reaper_rate * 6);
         let fut = async move {
             loop {
-                let _i = interval.next().await;
+                let _i = interval.tick().await;
                 let _ = shared_clone.garbage_collect();
             }
         };
-        shared_pool.spawn(fut).unwrap_or_else(|e| panic!("{}", e));
+        shared_pool.spawn(fut);
+//            .unwrap_or_else(|e| panic!("{}", e));
     }
 }
 
 // a shortcut for tokio timeout
-trait CrateTimeOut: Sized {
+trait CrateTimeOut: Sized + Future {
     fn timeout(self, dur: std::time::Duration) -> Timeout<Self> {
-        Timeout::new(self, dur)
+        timeout(dur, self)
     }
 }
 
