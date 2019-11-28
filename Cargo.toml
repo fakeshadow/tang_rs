@@ -34,7 +34,7 @@ version = "0.4.0"
 
 [dependencies.tokio]
 version = "=0.2.1"
-features = ["rt-core", "time"]
+features = ["rt-core", "time", "macros"]
 
 [dependencies.tokio-postgres]
 optional = true
@@ -46,3 +46,6 @@ git = "https://github.com/Marwes/redis-rs"
 branch = "async_await_api"
 default-features = false
 features = ["tokio-rt-core"]
+
+[dev-dependencies.futures]
+version = "0.3"
