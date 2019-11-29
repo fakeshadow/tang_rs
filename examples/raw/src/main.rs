@@ -32,7 +32,7 @@ async fn main() -> std::io::Result<()> {
         .max_size(12)
         .build(mgr)
         .await
-        .unwrap_or_else(|_| panic!("can't make pool"));
+        .expect("can't make pool");
 
     // wait a bit as the pool spawn connections asynchronously
     tokio::time::delay_for(std::time::Duration::from_secs(1)).await;

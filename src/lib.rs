@@ -333,12 +333,12 @@ impl<M: Manager + Send> Pool<M> {
     pub async fn init(&self) -> Result<(), M::Error> {
         let shared_pool = &self.0;
 
-        schedule_reaping(shared_pool);
-        garbage_collect(shared_pool);
-
         shared_pool
             .replenish_idle_conn(shared_pool.statics.min_idle)
             .await?;
+
+        schedule_reaping(shared_pool);
+        garbage_collect(shared_pool);
 
         Ok(())
     }

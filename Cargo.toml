@@ -34,7 +34,7 @@ version = "0.4.0"
 
 [dependencies.tokio]
 version = "=0.2.1"
-features = ["rt-core", "time", "macros"]
+features = ["rt-core", "time"]
 
 [dependencies.tokio-postgres]
 optional = true
@@ -47,5 +47,6 @@ branch = "async_await_api"
 default-features = false
 features = ["tokio-rt-core"]
 
-[dev-dependencies.futures]
-version = "0.3"
+[dev-dependencies.tokio]
+version = "=0.2.1"
+features = ["macros"]
