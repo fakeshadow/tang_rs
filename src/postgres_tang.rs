@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::RwLock;
 use std::{fmt, str::FromStr};
 
-use futures_util::{FutureExt, TryFutureExt, future::join_all};
+use futures_util::{future::join_all, FutureExt, TryFutureExt};
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
     types::Type,
@@ -280,5 +280,27 @@ impl From<Error> for PostgresPoolError {
 impl From<tokio::time::Elapsed> for PostgresPoolError {
     fn from(_e: tokio::time::Elapsed) -> PostgresPoolError {
         PostgresPoolError::TimeOut
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PostgresManager;
+    use crate::Builder;
+    use tokio_postgres::NoTls;
+
+    #[tokio::test]
+    async fn test_connection_limit() {
+        let db_url = "postgres://postgres:prisma@localhost/";
+        let mgr = PostgresManager::new_from_stringlike(db_url, NoTls).unwrap();
+
+        let pool = Builder::new()
+            .min_idle(10)
+            .max_size(10)
+            .build(mgr)
+            .await
+            .unwrap();
+
+        assert_eq!(10, pool.state().connections)
     }
 }
