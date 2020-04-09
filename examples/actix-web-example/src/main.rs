@@ -1,9 +1,7 @@
 #[macro_use]
 extern crate serde_derive;
 
-use actix_web::{
-    error::ErrorInternalServerError, web, App, Error, HttpResponse, HttpServer,
-};
+use actix_web::{error::ErrorInternalServerError, web, App, Error, HttpResponse, HttpServer};
 use futures_util::TryStreamExt;
 use once_cell::sync::Lazy;
 use tokio_postgres::{
@@ -38,9 +36,10 @@ static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
 
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
-
     // initialize tokio-postgres pool.
-    POOL.init().await.expect("Failed to initialize tokio-postgres pool");
+    POOL.init()
+        .await
+        .expect("Failed to initialize tokio-postgres pool");
 
     let mgr = RedisManager::new("redis://127.0.0.1");
     let pool_redis = Builder::new()
@@ -59,9 +58,9 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/test").route(web::get().to(test)))
             .service(web::resource("/test/redis").route(web::get().to(test_redis)))
     })
-        .bind("localhost:8000")?
-        .run()
-        .await
+    .bind("localhost:8000")?
+    .run()
+    .await
 }
 
 async fn test() -> Result<HttpResponse, Error> {

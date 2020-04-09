@@ -231,9 +231,8 @@ impl<M: Manager> PoolLockFuture<'_, M> {
         if inner.total() < shared.statics.max_size {
             inner.incr_pending_inner(1);
             let shared_clone = shared.clone();
-            shared
-                .spawn(async move { shared_clone.add_idle_conn().await });
-//                .unwrap_or_else(|_| inner.decr_pending_inner(1));
+            shared.spawn(async move { shared_clone.add_idle_conn().await });
+            //                .unwrap_or_else(|_| inner.decr_pending_inner(1));
         }
     }
 

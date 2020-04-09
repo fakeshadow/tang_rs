@@ -242,7 +242,10 @@ impl<M: Manager + Send> SharedPool<M> {
     async fn reap_idle_conn(&self) -> Result<(), M::Error> {
         let now = Instant::now();
 
-        println!("reaping connection. pool state now is: {:#?}", self.pool_lock.state());
+        println!(
+            "reaping connection. pool state now is: {:#?}",
+            self.pool_lock.state()
+        );
 
         let pending_new = self
             .pool_lock
@@ -487,11 +490,10 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
 // Conn<M> should be dropped in place where spawn_drop() is used.
 fn spawn_drop<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
     let shared_clone = shared.clone();
-    shared
-        .spawn(async move { shared_clone.drop_conn().await });
-//        .unwrap_or_else(|_| {
-//            shared.pool_lock.decr_spawned(|_| None);
-//        });
+    shared.spawn(async move { shared_clone.drop_conn().await });
+    //        .unwrap_or_else(|_| {
+    //            shared.pool_lock.decr_spawned(|_| None);
+    //        });
 }
 
 // schedule reaping runs in a spawned future.
@@ -507,7 +509,7 @@ fn schedule_reaping<M: Manager + Send>(shared_pool: &Arc<SharedPool<M>>) {
             }
         };
         shared_pool.spawn(fut);
-//            .unwrap_or_else(|e| panic!("{}", e));
+        //            .unwrap_or_else(|e| panic!("{}", e));
     }
 }
 
@@ -520,11 +522,11 @@ fn garbage_collect<M: Manager + Send>(shared_pool: &Arc<SharedPool<M>>) {
         let fut = async move {
             loop {
                 let _i = interval.tick().await;
-                let _ = shared_clone.garbage_collect();
+                shared_clone.garbage_collect();
             }
         };
         shared_pool.spawn(fut);
-//            .unwrap_or_else(|e| panic!("{}", e));
+        //            .unwrap_or_else(|e| panic!("{}", e));
     }
 }
 

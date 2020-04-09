@@ -1,6 +1,5 @@
 /* This example is not working */
 
-
 #![feature(proc_macro_hygiene)]
 
 #[macro_use]
