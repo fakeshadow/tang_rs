@@ -36,11 +36,11 @@ static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
         .unwrap_or_else(|e| panic!("{:?}", e))
 });
 
-fn main() -> std::io::Result<()> {
-    let mut sys = actix_rt::System::new("test pool");
+#[actix_rt::main]
+async fn main() -> std::io::Result<()> {
 
     // initialize tokio-postgres pool.
-    sys.block_on(POOL.init()).expect("Failed to initialize tokio-postgres pool");
+    POOL.init().await.expect("Failed to initialize tokio-postgres pool");
 
     let mgr = RedisManager::new("redis://127.0.0.1");
     let pool_redis = Builder::new()
@@ -49,9 +49,9 @@ fn main() -> std::io::Result<()> {
         .max_lifetime(None)
         .min_idle(1)
         .max_size(24)
-        .build(mgr);
-
-    let pool_redis = sys.block_on(pool_redis).expect("Failed to initialize redis pool");
+        .build(mgr)
+        .await
+        .expect("Failed to initialize redis pool");
 
     HttpServer::new(move || {
         App::new()
@@ -59,10 +59,9 @@ fn main() -> std::io::Result<()> {
             .service(web::resource("/test").route(web::get().to(test)))
             .service(web::resource("/test/redis").route(web::get().to(test_redis)))
     })
-    .bind("localhost:8000")?
-    .start();
-
-    sys.run()
+        .bind("localhost:8000")?
+        .run()
+        .await
 }
 
 async fn test() -> Result<HttpResponse, Error> {

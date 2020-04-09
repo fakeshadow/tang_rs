@@ -4,7 +4,7 @@ use tang_rs::{Builder, PostgresManager, PostgresPoolError, RedisManager};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let db_url = "postgres://postgres:123@localhost/test";
+    let db_url = "postgres://admin:admin@localhost/test";
 
     // setup manager
     let mgr = PostgresManager::new_from_stringlike(db_url, tokio_postgres::NoTls)

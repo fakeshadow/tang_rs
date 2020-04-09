@@ -6,22 +6,19 @@ edition = "2018"
 publish = false
 
 [dependencies.actix-rt]
-default-features = false
-version = "1.0.0-alpha.1"
+version = "1.1.0"
 
 [dependencies.actix-web]
-default-features = false
-git = "https://github.com/actix/actix-web.git"
+version = "3.0.0-alpha.1"
 
 [dependencies.futures-util]
-version = "=0.3.1"
+version = "0.3.4"
 
 [dependencies.once_cell]
 version = "1.2.0"
 
 [dependencies.redis]
-git = "https://github.com/Marwes/redis-rs"
-branch = "async_await_api"
+version = "0.15.1"
 default-features = false
 features = ["tokio-rt-core"]
 
@@ -37,4 +34,4 @@ path = "../../"
 features = ["tokio-postgres", "redis"]
 
 [dependencies.tokio-postgres]
-git = "https://github.com/sfackler/rust-postgres"
+version = "0.5.3"

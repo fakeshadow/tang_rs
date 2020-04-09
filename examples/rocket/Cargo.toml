@@ -6,11 +6,10 @@ edition = "2018"
 publish = false
 
 [dependencies.futures-util]
-version = "=0.3.1"
+version = "0.3.4"
 
 [dependencies.redis]
-git = "https://github.com/Marwes/redis-rs"
-branch = "async_await_api"
+version = "0.15.1"
 default-features = false
 features = ["tokio-rt-core"]
 
@@ -33,9 +32,9 @@ path = "../../"
 features = ["tokio-postgres", "redis"]
 
 [dependencies.tokio]
-version = "=0.2.1"
+version = "0.2.16"
 features = ["full"]
 
 [dependencies.tokio-postgres]
-git = "https://github.com/sfackler/rust-postgres"
+version = "0.5.3"
 

@@ -1,3 +1,6 @@
+/* This example is not working */
+
+
 #![feature(proc_macro_hygiene)]
 
 #[macro_use]
@@ -130,7 +133,7 @@ async fn index(
                     is_visible: r.get(9),
                 });
 
-                futures::future::ok((t, u))
+                futures_util::future::ok((t, u))
             },
         )
         .await

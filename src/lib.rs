@@ -235,11 +235,14 @@ impl<M: Manager + Send> SharedPool<M> {
                 e
             })?;
         }
+
         Ok(())
     }
 
     async fn reap_idle_conn(&self) -> Result<(), M::Error> {
         let now = Instant::now();
+
+        println!("reaping connection. pool state now is: {:#?}", self.pool_lock.state());
 
         let pending_new = self
             .pool_lock
