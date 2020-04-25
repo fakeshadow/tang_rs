@@ -1,0 +1,15 @@
+[package]
+name = "tokio-postgres-tang"
+version = "0.1.0"
+authors = ["fakeshadow <24548779@qq.com>"]
+edition = "2018"
+
+[dependencies.futures-util]
+version = "0.3.4"
+default-features = false
+
+[dependencies.tang-rs]
+path = "../"
+
+[dependencies.tokio-postgres]
+version = "0.5.3"

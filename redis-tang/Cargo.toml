@@ -1,0 +1,13 @@
+[package]
+name = "redis-tang"
+version = "0.1.0"
+authors = ["fakeshadow <24548779@qq.com>"]
+edition = "2018"
+
+[dependencies.redis]
+version = "0.15.1"
+default-features = false
+features = ["tokio-rt-core"]
+
+[dependencies.tang-rs]
+path = "../"

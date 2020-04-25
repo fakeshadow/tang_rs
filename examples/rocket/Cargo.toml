@@ -13,6 +13,9 @@ version = "0.15.1"
 default-features = false
 features = ["tokio-rt-core"]
 
+[dependencies.redis-tang]
+path = "../../redis-tang"
+
 [dependencies.rocket]
 git = "https://github.com/SergioBenitez/Rocket"
 branch = "async"
@@ -27,14 +30,13 @@ version = "1.0.101"
 [dependencies.serde_json]
 version = "1.0.40"
 
-[dependencies.tang-rs]
-path = "../../"
-features = ["tokio-postgres", "redis"]
-
 [dependencies.tokio]
 version = "0.2.16"
 features = ["full"]
 
 [dependencies.tokio-postgres]
 version = "0.5.3"
+
+[dependencies.tokio-postgres-tang]
+path = "../../tokio-postgres-tang"
 

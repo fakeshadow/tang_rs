@@ -1,11 +1,12 @@
+pub use tang_rs::{Builder, Pool};
+
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-use futures_util::TryFutureExt;
 use redis::{aio::MultiplexedConnection, Client, IntoConnectionInfo, RedisError};
 
-use crate::manager::{Manager, ManagerFuture};
-use std::fmt;
+use tang_rs::{Manager, ManagerFuture, TokioTimeElapsed};
 
 #[derive(Clone)]
 pub struct RedisManager {
@@ -26,14 +27,20 @@ impl Manager for RedisManager {
     type Error = RedisPoolError;
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
-        Box::pin(self.client.get_multiplexed_tokio_connection().err_into())
+        Box::pin(async move {
+            let conn = self.client.get_multiplexed_tokio_connection().await?;
+            Ok(conn)
+        })
     }
 
     fn is_valid<'a>(
         &'a self,
         c: &'a mut Self::Connection,
     ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
-        Box::pin(async move { redis::cmd("PING").query_async(c).err_into().await })
+        Box::pin(async move {
+            let _ = redis::cmd("PING").query_async(c).await?;
+            Ok(())
+        })
     }
 
     fn is_closed(&self, _conn: &mut Self::Connection) -> bool {
@@ -70,8 +77,8 @@ impl From<RedisError> for RedisPoolError {
     }
 }
 
-impl From<tokio::time::Elapsed> for RedisPoolError {
-    fn from(_e: tokio::time::Elapsed) -> RedisPoolError {
+impl From<TokioTimeElapsed> for RedisPoolError {
+    fn from(_e: TokioTimeElapsed) -> RedisPoolError {
         RedisPoolError::TimeOut
     }
 }

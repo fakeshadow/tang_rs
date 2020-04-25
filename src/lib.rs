@@ -5,7 +5,6 @@
 //!
 //! # Known Limitation:
 //! No tests.
-//! no `tokio-0.1` support.
 //! can't be used in nested runtimes.
 //!
 //! # Example:
@@ -13,7 +12,7 @@
 //!use std::time::Duration;
 //!
 //!use futures_util::TryStreamExt;
-//!use tang_rs::{Builder, PostgresPoolError, PostgresManager};
+//!use tokio_postgres_tang::{Builder, PostgresPoolError, PostgresManager};
 //!
 //!#[tokio::main]
 //!async fn main() -> std::io::Result<()> {
@@ -102,6 +101,11 @@
 //!}
 //!```
 
+pub use builder::Builder;
+pub use manager::{Manager, ManagerFuture};
+pub use tokio::spawn as tokio_spawn;
+pub use tokio::time::Elapsed as TokioTimeElapsed;
+
 use std::fmt;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
@@ -111,27 +115,11 @@ use std::time::Instant;
 
 use tokio::time::{interval, timeout, Timeout};
 
-pub use builder::Builder;
-pub use manager::Manager;
-#[cfg(feature = "mongodb")]
-pub use mongo_tang::{MongoManager, MongoPoolError};
-#[cfg(feature = "tokio-postgres")]
-pub use postgres_tang::{CacheStatement, PostgresManager, PostgresPoolError, PrepareStatement};
-#[cfg(feature = "redis")]
-pub use redis_tang::{RedisManager, RedisPoolError};
-
-use crate::manager::ManagerFuture;
 use crate::pool_inner::{PoolLock, State};
 
 mod builder;
 mod manager;
-#[cfg(feature = "mongodb")]
-mod mongo_tang;
 mod pool_inner;
-#[cfg(feature = "tokio-postgres")]
-mod postgres_tang;
-#[cfg(feature = "redis")]
-mod redis_tang;
 mod util;
 
 pub struct Conn<M: Manager> {
@@ -446,6 +434,10 @@ impl<M: Manager + Send> DerefMut for PoolRef<'_, M> {
 }
 
 impl<M: Manager + Send> PoolRef<'_, M> {
+    pub fn get_manager(&self) -> &M {
+        &self.pool.manager
+    }
+
     /// get a mut reference of connection.
     pub fn get_conn(&mut self) -> &mut M::Connection {
         &mut *self

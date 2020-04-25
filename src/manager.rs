@@ -2,7 +2,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
 
-pub(crate) type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// trait come from bb8.
 pub trait Manager: Send + Sync + 'static {

@@ -21,7 +21,8 @@ use tokio_postgres::{
 };
 
 use futures_util::TryStreamExt;
-use tang_rs::{Builder, Pool, PostgresManager, PostgresPoolError, RedisManager, RedisPoolError};
+use redis_tang::{RedisManager, RedisPoolError};
+use tokio_postgres_tang::{Builder, Pool, PostgresManager, PostgresPoolError};
 
 // dummy data
 const IDS: &[u32] = &[

@@ -1,3 +1,5 @@
+pub use tang_rs::{Builder, Pool};
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -11,8 +13,7 @@ use tokio_postgres::{
     Client, Config, Error, Socket, Statement,
 };
 
-use crate::manager::{Manager, ManagerFuture};
-use crate::PoolRef;
+use tang_rs::{tokio_spawn, Manager, ManagerFuture, PoolRef, TokioTimeElapsed};
 
 pub struct PostgresManager<Tls>
 where
@@ -51,7 +52,7 @@ where
     /// ```no_run
     /// use tokio_postgres::types::Type;
     /// use tokio_postgres::NoTls;
-    /// use tang_rs::PostgresManager;
+    /// use tokio_postgres_tang::PostgresManager;
     ///
     /// let db_url = "postgres://postgres:123@localhost/test";
     /// let mgr = PostgresManager::new_from_stringlike(db_url, NoTls)
@@ -82,7 +83,7 @@ where
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
         Box::pin(async move {
             let (c, conn) = self.config.connect(self.tls.clone()).await?;
-            tokio::spawn(conn.map(|_| ()));
+            tokio_spawn(conn.map(|_| ()));
 
             let prepares = self
                 .prepares
@@ -216,23 +217,24 @@ where
     <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
 {
     fn prepare_statements(&mut self, statements: &[(&str, &str, &[Type])]) -> &mut Self {
-        let mut prepares = self
-            .pool
-            .manager
-            .prepares
-            .write()
-            .expect("Failed to lock/write prepared statements");
+        // ToDo: check this {}.
+        {
+            let mut prepares = self
+                .get_manager()
+                .prepares
+                .write()
+                .expect("Failed to lock/write prepared statements");
 
-        for (alias, query, types) in statements.iter() {
-            prepares.insert((*alias).into(), (*query, *types).into());
+            for (alias, query, types) in statements.iter() {
+                prepares.insert((*alias).into(), (*query, *types).into());
+            }
         }
 
         self
     }
 
     fn clear_prepared_statements(&mut self) -> &mut Self {
-        self.pool
-            .manager
+        self.get_manager()
             .prepares
             .write()
             .expect("Failed to lock/write prepared statements")
@@ -277,8 +279,8 @@ impl From<Error> for PostgresPoolError {
     }
 }
 
-impl From<tokio::time::Elapsed> for PostgresPoolError {
-    fn from(_e: tokio::time::Elapsed) -> PostgresPoolError {
+impl From<TokioTimeElapsed> for PostgresPoolError {
+    fn from(_e: TokioTimeElapsed) -> PostgresPoolError {
         PostgresPoolError::TimeOut
     }
 }
@@ -286,7 +288,7 @@ impl From<tokio::time::Elapsed> for PostgresPoolError {
 #[cfg(test)]
 mod tests {
     use super::PostgresManager;
-    use crate::Builder;
+    use tang_rs::Builder;
     use tokio_postgres::NoTls;
 
     #[tokio::test]

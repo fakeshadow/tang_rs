@@ -4,12 +4,13 @@ extern crate serde_derive;
 use actix_web::{error::ErrorInternalServerError, web, App, Error, HttpResponse, HttpServer};
 use futures_util::TryStreamExt;
 use once_cell::sync::Lazy;
+
+use redis_tang::RedisManager;
 use tokio_postgres::{
     types::{ToSql, Type},
     NoTls, Row,
 };
-
-use tang_rs::{Builder, Pool, PostgresManager, RedisManager};
+use tokio_postgres_tang::{Builder, Pool, PostgresManager};
 
 // use once cell for a static tokio-postgres pool. so we don't have to pass the pool to App::data
 static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {

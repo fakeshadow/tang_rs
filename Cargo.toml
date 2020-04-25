@@ -22,30 +22,19 @@ members = [
   "examples/actix-web-example",
   "examples/rocket",
   "examples/raw",
+  "tokio-postgres-tang",
+  "redis-tang",
+#  "mongodb-tang"
 ]
 
 [dependencies.futures-util]
 version = "0.3.4"
 default-features = false
 
-[dependencies.mongodb]
-optional = true
-version = "0.4.0"
-
 [dependencies.tokio]
 version = "0.2.16"
 default-features = false
 features = [ "rt-core", "time" ]
-
-[dependencies.tokio-postgres]
-optional = true
-version = "0.5.3"
-
-[dependencies.redis]
-optional = true
-version = "0.15.1"
-default-features = false
-features = ["tokio-rt-core"]
 
 [dev-dependencies.tokio]
 version = "0.2.16"

@@ -17,6 +17,9 @@ version = "0.3.4"
 [dependencies.once_cell]
 version = "1.2.0"
 
+[dependencies.redis-tang]
+path = "../../redis-tang"
+
 [dependencies.redis]
 version = "0.15.1"
 default-features = false
@@ -29,9 +32,8 @@ default-features = false
 [dependencies.serde_derive]
 version = "1.0.101"
 
-[dependencies.tang-rs]
-path = "../../"
-features = ["tokio-postgres", "redis"]
-
 [dependencies.tokio-postgres]
 version = "0.5.3"
+
+[dependencies.tokio-postgres-tang]
+path = "../../tokio-postgres-tang"

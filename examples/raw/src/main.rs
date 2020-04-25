@@ -1,6 +1,7 @@
 use tokio_postgres::types::Type;
 
-use tang_rs::{Builder, PostgresManager, PostgresPoolError, RedisManager};
+use redis_tang::RedisManager;
+use tokio_postgres_tang::{Builder, PostgresManager, PostgresPoolError};
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {

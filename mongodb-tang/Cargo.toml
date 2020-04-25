@@ -1,0 +1,11 @@
+[package]
+name = "mongodb-tang"
+version = "0.1.0"
+authors = ["fakeshadow <24548779@qq.com>"]
+edition = "2018"
+
+[dependencies.mongodb]
+version = "0.9.2"
+
+[dependencies.tang-rs]
+path = "../"

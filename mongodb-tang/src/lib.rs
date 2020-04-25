@@ -2,9 +2,9 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 
-use mongodb::{Client, Error, ThreadedClient};
+use mongodb::{Client, error::Error, ThreadedClient};
 
-use crate::manager::{Manager, ManagerFuture};
+use tang_rs::{Manager, ManagerFuture, TokioTimeElapsed};
 
 pub struct MongoManager {
     host: String,
@@ -83,8 +83,8 @@ impl From<Error> for MongoPoolError {
     }
 }
 
-impl From<tokio::time::Elapsed> for MongoPoolError {
-    fn from(_e: tokio::time::Elapsed) -> MongoPoolError {
+impl From<TokioTimeElapsed> for MongoPoolError {
+    fn from(_e: TokioTimeElapsed) -> MongoPoolError {
         MongoPoolError::TimeOut
     }
 }
