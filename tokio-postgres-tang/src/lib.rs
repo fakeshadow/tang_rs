@@ -1,4 +1,4 @@
-pub use tang_rs::{Builder, Pool};
+pub use tang_rs::{Builder, Pool, PoolRef};
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -13,7 +13,7 @@ use tokio_postgres::{
     Client, Config, Error, Socket, Statement,
 };
 
-use tang_rs::{tokio_spawn, Manager, ManagerFuture, PoolRef, TokioTimeElapsed};
+use tang_rs::{tokio_spawn, Manager, ManagerFuture, TokioTimeElapsed};
 
 pub struct PostgresManager<Tls>
 where

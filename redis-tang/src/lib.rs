@@ -1,4 +1,4 @@
-pub use tang_rs::{Builder, Pool};
+pub use tang_rs::{Builder, Pool, PoolRef};
 
 use std::fmt;
 use std::future::Future;
