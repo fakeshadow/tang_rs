@@ -168,21 +168,16 @@ struct SharedPool<M: Manager + Send> {
 }
 
 impl<M: Manager + Send> SharedPool<M> {
-    async fn drop_conn(&self) -> Result<(), M::Error> {
+    fn drop_conn(&self) -> Option<u8> {
         //  We might need to spin up more connections to maintain the idle limit, e.g.
         //  if we hit connection lifetime limits
-        let pending_count = self.pool_lock.decr_spawned(|total_now| {
+        self.pool_lock.decr_spawned(|total_now| {
             if total_now < self.statics.min_idle {
                 Some(self.statics.min_idle - total_now)
             } else {
                 None
             }
-        });
-
-        match pending_count {
-            Some(count) => self.replenish_idle_conn(count).await,
-            None => Ok(()),
-        }
+        })
     }
 
     // use `Builder`'s connection_timeout setting to cancel the `connect` method and return error.
@@ -219,7 +214,10 @@ impl<M: Manager + Send> SharedPool<M> {
             self.add_idle_conn().await.map_err(|e| {
                 // we return when an error occur so we should drop all the pending after the i.
                 // (the pending of i is already dropped in add_connection method)
-                self.pool_lock.decr_pending(pending_count - i - 1);
+                let count = pending_count - i - 1;
+                if count > 0 {
+                    self.pool_lock.decr_pending(count);
+                };
                 e
             })?;
         }
@@ -408,6 +406,10 @@ impl<M: Manager + Send> Pool<M> {
         })
     }
 
+    pub fn get_manager(&self) -> &M {
+        &self.0.manager
+    }
+
     /// Return a state of the pool inner. This call will block the thread and wait for lock.
     pub fn state(&self) -> State {
         self.0.pool_lock.state()
@@ -480,12 +482,14 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
 
 // helper function to spawn drop connection and spawn new ones if needed.
 // Conn<M> should be dropped in place where spawn_drop() is used.
+// ToDo: Will get unsolvable pendings if the spawn is panic;
 fn spawn_drop<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
-    let shared_clone = shared.clone();
-    shared.spawn(async move { shared_clone.drop_conn().await });
-    //        .unwrap_or_else(|_| {
-    //            shared.pool_lock.decr_spawned(|_| None);
-    //        });
+    if let Some(pending) = shared.drop_conn() {
+        let shared_clone = shared.clone();
+        shared.spawn(async move {
+            let _ = shared_clone.replenish_idle_conn(pending).await;
+        });
+    }
 }
 
 // schedule reaping runs in a spawned future.
@@ -501,7 +505,6 @@ fn schedule_reaping<M: Manager + Send>(shared_pool: &Arc<SharedPool<M>>) {
             }
         };
         shared_pool.spawn(fut);
-        //            .unwrap_or_else(|e| panic!("{}", e));
     }
 }
 
@@ -518,7 +521,6 @@ fn garbage_collect<M: Manager + Send>(shared_pool: &Arc<SharedPool<M>>) {
             }
         };
         shared_pool.spawn(fut);
-        //            .unwrap_or_else(|e| panic!("{}", e));
     }
 }
 

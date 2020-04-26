@@ -1,4 +1,9 @@
-(April 259, 2020)
+(April 26, 2020)
+----------------------
+### Add
+- Expose `Manager` with `Pool::get_manager`
+
+(April 25, 2020)
 ----------------------
 ### Breaking
 - Split into multiple crate
