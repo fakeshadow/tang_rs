@@ -81,7 +81,7 @@ impl Manager for TestPoolManager {
     where
         Fut: Future + Send + 'fu,
     {
-        Box::pin(async move { timeout(dur, fut).await })
+        Box::pin(timeout(dur, fut))
     }
 
     // override the schedule_inner method to run schedule task to go over all the connections.
@@ -112,7 +112,7 @@ async fn main() {
     for _i in 0..24 {
         let pool = pool.clone();
         let tx = tx.clone();
-        async_std::task::spawn(async move {
+        task::spawn(async move {
             let mut pool_ref = pool.get().await.expect("fail to get PoolRef");
             let conn_ref = &*pool_ref;
             println!("we have the reference of a connection : {:?}", conn_ref);

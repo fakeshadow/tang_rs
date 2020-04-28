@@ -77,7 +77,10 @@ impl<M: Manager> PoolLock<M> {
     }
 
     #[inline]
-    pub(crate) fn lock<'a>(&'a self, shared_pool: &'a Arc<ManagedPool<M>>) -> PoolLockFuture<'a, M> {
+    pub(crate) fn lock<'a>(
+        &'a self,
+        shared_pool: &'a Arc<ManagedPool<M>>,
+    ) -> PoolLockFuture<'a, M> {
         PoolLockFuture {
             shared_pool,
             pool_lock: self,

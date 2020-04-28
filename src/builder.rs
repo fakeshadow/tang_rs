@@ -147,6 +147,7 @@ impl Builder {
         Ok(Pool::new(self, manager))
     }
 
+    /// expose `reaper_rate` to public.
     pub fn get_reaper_rate(&self) -> Duration {
         self.reaper_rate
     }

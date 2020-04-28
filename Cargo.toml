@@ -3,8 +3,8 @@ name = "tang-rs"
 version = "0.1.2"
 authors = ["fakeshadow <24548779@qq.com>"]
 edition = "2018"
-description = "A light weight asynchronous connection pool runs on tokio"
-keywords = ["database", "async", "pool"]
+description = "A light weight asynchronous connection pool"
+keywords = ["async", "pool"]
 license = "MIT"
 exclude = ["examples/*"]
 repository = "https://github.com/fakeshadow/tang_rs"
@@ -28,6 +28,6 @@ members = [
 #  "mongodb-tang"
 ]
 
-[dev-dependencies.tokio]
-version = "0.2.16"
-features = ["macros"]
+[dev-dependencies.async-std]
+version = "1.5.0"
+features = ["attributes", "unstable"]

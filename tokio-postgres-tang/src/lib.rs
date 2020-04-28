@@ -66,29 +66,7 @@
 //!    // drop the pool ref to return connection to pool
 //!    drop(pool_ref);
 //!
-//!    // run the pool and use closure to query the pool.
-//!    let _rows = pool
-//!        .run(|mut conn| Box::pin(  // pin the async function to make sure the &mut Conn outlives our closure.
-//!            async move {
-//!                let (client, statements) = &conn;
-//!                let statement = statements.get("get_topics").unwrap();
-//!                let rows = client.query(statement, &[]).await?;
-//!
-//!                // default error type.
-//!                // you can infer your own error type as long as it impl From trait for tang_rs::PostgresPoolError
-//!                Ok::<_, PostgresPoolError>(rows)
-//!             }
-//!        ))
-//!        .await
-//!        .map_err(|e| {
-//!            match e {
-//!                PostgresPoolError::Inner(e) => println!("{:?}", e),
-//!                PostgresPoolError::TimeOut => ()
-//!                };
-//!            std::io::Error::new(std::io::ErrorKind::Other, "place holder error")
-//!        })?;
-//!
-//!   Ok(())
+//!    Ok(())
 //!}
 //!```
 
