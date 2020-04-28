@@ -88,7 +88,7 @@ use tokio_postgres::{
     Client, Config, Error, Socket, Statement,
 };
 
-use tang_rs::{Manager, ManagerFuture, SharedManagedPool};
+use tang_rs::{Manager, ManagerFuture, WeakSharedManagedPool};
 
 pub struct PostgresManager<Tls>
 where
@@ -216,22 +216,42 @@ where
         Box::pin(timeout(dur, fut))
     }
 
-    fn schedule_inner(shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
-        let mut interval = interval(shared_pool.get_builder().get_reaper_rate());
+    fn schedule_inner(shared_pool: WeakSharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
+        let rate = shared_pool
+            .upgrade()
+            .expect("Pool is gone before we start schedule work")
+            .get_builder()
+            .get_reaper_rate();
+        let mut interval = interval(rate);
         Box::pin(async move {
             loop {
                 let _i = interval.tick().await;
-                let _ = shared_pool.reap_idle_conn().await;
+                match shared_pool.upgrade() {
+                    Some(shared_pool) => {
+                        let _ = shared_pool.reap_idle_conn().await;
+                    }
+                    None => break,
+                }
             }
         })
     }
 
-    fn garbage_collect_inner(shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
-        let mut interval = interval(shared_pool.get_builder().get_reaper_rate() * 6);
+    fn garbage_collect_inner(
+        shared_pool: WeakSharedManagedPool<Self>,
+    ) -> ManagerFuture<'static, ()> {
+        let rate = shared_pool
+            .upgrade()
+            .expect("Pool is gone before we start garbage collection")
+            .get_builder()
+            .get_reaper_rate();
+        let mut interval = interval(rate * 6);
         Box::pin(async move {
             loop {
                 let _i = interval.tick().await;
-                shared_pool.garbage_collect();
+                match shared_pool.upgrade() {
+                    Some(shared_pool) => shared_pool.garbage_collect(),
+                    None => break,
+                }
             }
         })
     }

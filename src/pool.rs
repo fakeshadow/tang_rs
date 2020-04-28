@@ -2,7 +2,7 @@ use std::fmt;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use crate::builder::Builder;
@@ -156,6 +156,7 @@ impl<M: Manager + Send> ManagedPool<M> {
 }
 
 pub type SharedManagedPool<M> = Arc<ManagedPool<M>>;
+pub type WeakSharedManagedPool<M> = Weak<ManagedPool<M>>;
 
 pub struct Pool<M: Manager + Send>(SharedManagedPool<M>);
 

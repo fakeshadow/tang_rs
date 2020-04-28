@@ -1,9 +1,10 @@
 use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::pool::SharedManagedPool;
+use crate::pool::{SharedManagedPool, WeakSharedManagedPool};
 
 pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -50,13 +51,15 @@ pub trait Manager: Sized + Send + Sync + 'static {
 
     /// Override this method if you actually want to handle a schedule task.
     /// The schedule interval is determined by `Builder::reaper_rate`
-    fn schedule_inner(_shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
+    fn schedule_inner(_shared_pool: WeakSharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
         Box::pin(async {})
     }
 
     /// Override this method if you actually want to do some garbage collection.
     /// The garbage collect interval is determined by `Builder::reaper_rate * 6`
-    fn garbage_collect_inner(_shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
+    fn garbage_collect_inner(
+        _shared_pool: WeakSharedManagedPool<Self>,
+    ) -> ManagerFuture<'static, ()> {
         Box::pin(async {})
     }
 
@@ -71,7 +74,7 @@ pub trait Manager: Sized + Send + Sync + 'static {
     fn schedule_reaping(&self, shared_pool: &SharedManagedPool<Self>) {
         let statics = shared_pool.get_builder();
         if statics.max_lifetime.is_some() || statics.idle_timeout.is_some() {
-            let fut = Self::schedule_inner(shared_pool.clone());
+            let fut = Self::schedule_inner(Arc::downgrade(shared_pool));
             self.spawn(fut);
         }
     }
@@ -80,7 +83,7 @@ pub trait Manager: Sized + Send + Sync + 'static {
     fn garbage_collect(&self, shared_pool: &SharedManagedPool<Self>) {
         let statics = shared_pool.get_builder();
         if statics.use_gc {
-            let fut = Self::garbage_collect_inner(shared_pool.clone());
+            let fut = Self::garbage_collect_inner(Arc::downgrade(shared_pool));
             self.spawn(fut);
         }
     }

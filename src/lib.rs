@@ -115,7 +115,7 @@
 
 pub use builder::Builder;
 pub use manager::{Manager, ManagerFuture};
-pub use pool::{Pool, PoolRef, SharedManagedPool};
+pub use pool::{Pool, PoolRef, WeakSharedManagedPool};
 
 mod builder;
 mod manager;
