@@ -95,19 +95,22 @@
 pub use tang_rs::{Builder, Pool, PoolRef};
 
 use std::collections::HashMap;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::RwLock;
-use std::{fmt, str::FromStr};
+use std::time::Duration;
 
 use futures_util::{future::join_all, FutureExt, TryFutureExt};
+use tokio::time::{interval, timeout, Elapsed};
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
     types::Type,
     Client, Config, Error, Socket, Statement,
 };
 
-use tang_rs::{tokio_spawn, Manager, ManagerFuture, TokioTimeElapsed};
+use tang_rs::{Manager, ManagerFuture, SharedManagedPool};
 
 pub struct PostgresManager<Tls>
 where
@@ -173,11 +176,12 @@ where
 {
     type Connection = (Client, HashMap<String, Statement>);
     type Error = PostgresPoolError;
+    type TimeoutError = Elapsed;
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
         Box::pin(async move {
             let (c, conn) = self.config.connect(self.tls.clone()).await?;
-            tokio_spawn(conn.map(|_| ()));
+            tokio::spawn(conn.map(|_| ()));
 
             let prepares = self
                 .prepares
@@ -214,6 +218,44 @@ where
 
     fn is_closed(&self, conn: &mut Self::Connection) -> bool {
         conn.0.is_closed()
+    }
+
+    fn spawn<Fut>(&self, fut: Fut)
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(fut);
+    }
+
+    fn timeout<'fu, Fut>(
+        &self,
+        fut: Fut,
+        dur: Duration,
+    ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
+    where
+        Fut: Future + Send + 'fu,
+    {
+        Box::pin(timeout(dur, fut))
+    }
+
+    fn schedule_inner(shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
+        let mut interval = interval(shared_pool.get_builder().get_reaper_rate());
+        Box::pin(async move {
+            loop {
+                let _i = interval.tick().await;
+                let _ = shared_pool.reap_idle_conn().await;
+            }
+        })
+    }
+
+    fn garbage_collect_inner(shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
+        let mut interval = interval(shared_pool.get_builder().get_reaper_rate() * 6);
+        Box::pin(async move {
+            loop {
+                let _i = interval.tick().await;
+                shared_pool.garbage_collect();
+            }
+        })
     }
 }
 
@@ -373,8 +415,8 @@ impl From<Error> for PostgresPoolError {
     }
 }
 
-impl From<TokioTimeElapsed> for PostgresPoolError {
-    fn from(_e: TokioTimeElapsed) -> PostgresPoolError {
+impl From<Elapsed> for PostgresPoolError {
+    fn from(_e: Elapsed) -> PostgresPoolError {
         PostgresPoolError::TimeOut
     }
 }

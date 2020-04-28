@@ -13,3 +13,9 @@ path = "../"
 
 [dependencies.tokio-postgres]
 version = "0.5.3"
+
+[dependencies.tokio]
+version = "0.2.19"
+default-features = false
+features = ["rt-threaded", "time"]
+

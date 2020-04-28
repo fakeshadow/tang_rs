@@ -11,3 +11,8 @@ features = ["tokio-rt-core"]
 
 [dependencies.tang-rs]
 path = "../"
+
+[dependencies.tokio]
+version = "0.2.19"
+default-features = false
+features = ["rt-threaded", "time"]

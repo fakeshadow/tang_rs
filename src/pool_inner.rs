@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use crate::{manager::Manager, util::linked_list::WakerList, IdleConn, SharedPool};
+use crate::{manager::Manager, util::linked_list::WakerList, IdleConn, ManagedPool};
 
 #[derive(Debug, Clone)]
 pub struct Pending {
@@ -77,7 +77,7 @@ impl<M: Manager> PoolLock<M> {
     }
 
     #[inline]
-    pub(crate) fn lock<'a>(&'a self, shared_pool: &'a Arc<SharedPool<M>>) -> PoolLockFuture<'a, M> {
+    pub(crate) fn lock<'a>(&'a self, shared_pool: &'a Arc<ManagedPool<M>>) -> PoolLockFuture<'a, M> {
         PoolLockFuture {
             shared_pool,
             pool_lock: self,
@@ -198,7 +198,7 @@ impl<M: Manager> PoolLock<M> {
 // `PoolLockFuture` return a future of `IdleConn`. In the `Future` we pass it's `Waker` to `PoolLock`.
 // Then when a `IdleConn` is returned to pool we lock the `PoolLock` and wake the `Wakers` inside it to notify other `PoolLockFuture` it's time to continue.
 pub(crate) struct PoolLockFuture<'a, M: Manager> {
-    shared_pool: &'a Arc<SharedPool<M>>,
+    shared_pool: &'a Arc<ManagedPool<M>>,
     pool_lock: &'a PoolLock<M>,
     wait_key: Option<NonZeroUsize>,
     acquired: bool,
@@ -228,9 +228,11 @@ impl<M: Manager> PoolLockFuture<'_, M> {
     #[inline]
     fn spawn_idle_conn(&self, inner: &mut MutexGuard<'_, PoolInner<M>>) {
         let shared = self.shared_pool;
-        if inner.total() < shared.statics.max_size {
+        if inner.total() < shared.builder.max_size {
             let shared_clone = shared.clone();
-            shared.spawn(async move { shared_clone.add_idle_conn().await });
+            shared.spawn(async move {
+                let _ = shared_clone.add_idle_conn().await;
+            });
             inner.incr_pending_inner(1);
         }
     }

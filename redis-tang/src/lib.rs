@@ -3,10 +3,11 @@ pub use tang_rs::{Builder, Pool, PoolRef};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use redis::{aio::MultiplexedConnection, Client, IntoConnectionInfo, RedisError};
-
-use tang_rs::{Manager, ManagerFuture, TokioTimeElapsed};
+use tang_rs::{Manager, ManagerFuture, SharedManagedPool};
+use tokio::time::{interval, timeout, Elapsed};
 
 #[derive(Clone)]
 pub struct RedisManager {
@@ -25,6 +26,7 @@ impl RedisManager {
 impl Manager for RedisManager {
     type Connection = MultiplexedConnection;
     type Error = RedisPoolError;
+    type TimeoutError = Elapsed;
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
         Box::pin(async move {
@@ -45,6 +47,44 @@ impl Manager for RedisManager {
 
     fn is_closed(&self, _conn: &mut Self::Connection) -> bool {
         false
+    }
+
+    fn spawn<Fut>(&self, fut: Fut)
+    where
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        tokio::spawn(fut);
+    }
+
+    fn timeout<'fu, Fut>(
+        &self,
+        fut: Fut,
+        dur: Duration,
+    ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
+    where
+        Fut: Future + Send + 'fu,
+    {
+        Box::pin(timeout(dur, fut))
+    }
+
+    fn schedule_inner(shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
+        let mut interval = interval(shared_pool.get_builder().get_reaper_rate());
+        Box::pin(async move {
+            loop {
+                let _i = interval.tick().await;
+                let _ = shared_pool.reap_idle_conn().await;
+            }
+        })
+    }
+
+    fn garbage_collect_inner(shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
+        let mut interval = interval(shared_pool.get_builder().get_reaper_rate() * 6);
+        Box::pin(async move {
+            loop {
+                let _i = interval.tick().await;
+                shared_pool.garbage_collect();
+            }
+        })
     }
 }
 
@@ -77,8 +117,8 @@ impl From<RedisError> for RedisPoolError {
     }
 }
 
-impl From<TokioTimeElapsed> for RedisPoolError {
-    fn from(_e: TokioTimeElapsed) -> RedisPoolError {
+impl From<Elapsed> for RedisPoolError {
+    fn from(_e: Elapsed) -> RedisPoolError {
         RedisPoolError::TimeOut
     }
 }

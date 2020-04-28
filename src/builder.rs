@@ -146,4 +146,8 @@ impl Builder {
 
         Ok(Pool::new(self, manager))
     }
+
+    pub fn get_reaper_rate(&self) -> Duration {
+        self.reaper_rate
+    }
 }

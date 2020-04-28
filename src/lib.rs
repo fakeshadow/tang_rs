@@ -9,8 +9,6 @@
 
 pub use builder::Builder;
 pub use manager::{Manager, ManagerFuture};
-pub use tokio::spawn as tokio_spawn;
-pub use tokio::time::Elapsed as TokioTimeElapsed;
 
 use std::fmt;
 use std::future::Future;
@@ -18,8 +16,6 @@ use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
-
-use tokio::time::{interval, timeout, Timeout};
 
 use crate::pool_inner::{PoolLock, State};
 
@@ -67,19 +63,19 @@ impl<M: Manager> From<IdleConn<M>> for Conn<M> {
     }
 }
 
-struct SharedPool<M: Manager + Send> {
-    statics: Builder,
+pub struct ManagedPool<M: Manager + Send> {
+    builder: Builder,
     manager: M,
     pool_lock: PoolLock<M>,
 }
 
-impl<M: Manager + Send> SharedPool<M> {
+impl<M: Manager + Send> ManagedPool<M> {
     fn drop_conn(&self) -> Option<u8> {
         //  We might need to spin up more connections to maintain the idle limit, e.g.
         //  if we hit connection lifetime limits
         self.pool_lock.decr_spawned(|total_now| {
-            if total_now < self.statics.min_idle {
-                Some(self.statics.min_idle - total_now)
+            if total_now < self.builder.min_idle {
+                Some(self.builder.min_idle - total_now)
             } else {
                 None
             }
@@ -88,10 +84,12 @@ impl<M: Manager + Send> SharedPool<M> {
 
     // use `Builder`'s connection_timeout setting to cancel the `connect` method and return error.
     async fn add_idle_conn(&self) -> Result<(), M::Error> {
+        let fut = self.manager.connect();
+        let timeout = self.builder.connection_timeout;
+
         let conn = self
             .manager
-            .connect()
-            .timeout(self.statics.connection_timeout)
+            .timeout(fut, timeout)
             .await
             .map_err(|e| {
                 self.pool_lock.decr_pending(1);
@@ -108,11 +106,11 @@ impl<M: Manager + Send> SharedPool<M> {
     }
 
     async fn check_conn(&self, conn: &mut Conn<M>) -> Result<Result<(), M::Error>, M::Error> {
-        self.manager
-            .is_valid(&mut conn.conn)
-            .timeout(self.statics.connection_timeout)
-            .await?
-            .map(Ok)
+        let fut = self.manager.is_valid(&mut conn.conn);
+
+        let timeout = self.builder.connection_timeout;
+
+        self.manager.timeout(fut, timeout).await?.map(Ok)
     }
 
     async fn replenish_idle_conn(&self, pending_count: u8) -> Result<(), M::Error> {
@@ -131,7 +129,7 @@ impl<M: Manager + Send> SharedPool<M> {
         Ok(())
     }
 
-    async fn reap_idle_conn(&self) -> Result<(), M::Error> {
+    pub async fn reap_idle_conn(&self) -> Result<(), M::Error> {
         let now = Instant::now();
 
         println!(
@@ -141,12 +139,12 @@ impl<M: Manager + Send> SharedPool<M> {
 
         let pending_new = self
             .pool_lock
-            .try_drop_conns(self.statics.min_idle, |conn| {
+            .try_drop_conns(self.builder.min_idle, |conn| {
                 let mut should_drop = false;
-                if let Some(timeout) = self.statics.idle_timeout {
+                if let Some(timeout) = self.builder.idle_timeout {
                     should_drop |= now >= conn.idle_start + timeout;
                 }
-                if let Some(lifetime) = self.statics.max_lifetime {
+                if let Some(lifetime) = self.builder.max_lifetime {
                     should_drop |= now >= conn.idle_start + lifetime;
                 }
                 should_drop
@@ -158,22 +156,28 @@ impl<M: Manager + Send> SharedPool<M> {
         }
     }
 
-    fn garbage_collect(&self) {
+    pub fn garbage_collect(&self) {
         self.pool_lock
-            .drop_pendings(|pending| pending.should_remove(self.statics.connection_timeout));
+            .drop_pendings(|pending| pending.should_remove(self.builder.connection_timeout));
     }
 
     // ToDo: we should figure a way to handle failed spawn.
-    fn spawn<F>(&self, f: F)
+    fn spawn<Fut>(&self, fut: Fut)
     where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
-        tokio::spawn(f);
+        self.manager.spawn(fut);
+    }
+
+    pub fn get_builder(&self) -> &Builder
+    {
+        &self.builder
     }
 }
 
-pub struct Pool<M: Manager + Send>(Arc<SharedPool<M>>);
+pub type SharedManagedPool<M> = Arc<ManagedPool<M>>;
+
+pub struct Pool<M: Manager + Send>(SharedManagedPool<M>);
 
 impl<M: Manager + Send> Clone for Pool<M> {
     fn clone(&self) -> Self {
@@ -191,8 +195,8 @@ impl<M: Manager + Send> Pool<M> {
     fn new(builder: Builder, manager: M) -> Self {
         let size = builder.max_size as usize;
 
-        Pool(Arc::new(SharedPool {
-            statics: builder,
+        Pool(Arc::new(ManagedPool {
+            builder,
             manager,
             pool_lock: PoolLock::new(size),
         }))
@@ -232,11 +236,10 @@ impl<M: Manager + Send> Pool<M> {
         let shared_pool = &self.0;
 
         shared_pool
-            .replenish_idle_conn(shared_pool.statics.min_idle)
+            .replenish_idle_conn(shared_pool.builder.min_idle)
             .await?;
 
-        schedule_reaping(shared_pool);
-        garbage_collect(shared_pool);
+        shared_pool.manager.on_start(shared_pool);
 
         Ok(())
     }
@@ -284,14 +287,12 @@ impl<M: Manager + Send> Pool<M> {
         Box::pin(async move {
             let shared_pool = &self.0;
 
-            let mut conn = shared_pool
-                .pool_lock
-                .lock(shared_pool)
-                .timeout(shared_pool.statics.wait_timeout)
-                .await?
-                .into();
+            let fut = shared_pool.pool_lock.lock(shared_pool);
+            let timeout = shared_pool.builder.wait_timeout;
 
-            if shared_pool.statics.always_check {
+            let mut conn = shared_pool.manager.timeout(fut, timeout).await?.into();
+
+            if shared_pool.builder.always_check {
                 let result = shared_pool.check_conn(&mut conn).await.map_err(|e| {
                     spawn_drop(shared_pool);
                     e
@@ -324,7 +325,7 @@ impl<M: Manager + Send> Pool<M> {
 
 pub struct PoolRef<'a, M: Manager + Send> {
     conn: Option<Conn<M>>,
-    pool: &'a Arc<SharedPool<M>>,
+    pool: &'a Arc<ManagedPool<M>>,
 }
 
 impl<M: Manager + Send> Deref for PoolRef<'_, M> {
@@ -389,52 +390,11 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
 // helper function to spawn drop connection and spawn new ones if needed.
 // Conn<M> should be dropped in place where spawn_drop() is used.
 // ToDo: Will get unsolvable pendings if the spawn is panic;
-fn spawn_drop<M: Manager + Send>(shared: &Arc<SharedPool<M>>) {
-    if let Some(pending) = shared.drop_conn() {
-        let shared_clone = shared.clone();
-        shared.spawn(async move {
+fn spawn_drop<M: Manager + Send>(shared_pool: &Arc<ManagedPool<M>>) {
+    if let Some(pending) = shared_pool.drop_conn() {
+        let shared_clone = shared_pool.clone();
+        shared_pool.spawn(async move {
             let _ = shared_clone.replenish_idle_conn(pending).await;
         });
     }
 }
-
-// schedule reaping runs in a spawned future.
-fn schedule_reaping<M: Manager + Send>(shared_pool: &Arc<SharedPool<M>>) {
-    let statics = &shared_pool.statics;
-    if statics.max_lifetime.is_some() || statics.idle_timeout.is_some() {
-        let shared_clone = shared_pool.clone();
-        let mut interval = interval(statics.reaper_rate);
-        let fut = async move {
-            loop {
-                let _i = interval.tick().await;
-                let _ = shared_clone.reap_idle_conn().await;
-            }
-        };
-        shared_pool.spawn(fut);
-    }
-}
-
-// schedule garbage collection runs in a spawned future.
-fn garbage_collect<M: Manager + Send>(shared_pool: &Arc<SharedPool<M>>) {
-    let statics = &shared_pool.statics;
-    if statics.use_gc {
-        let shared_clone = shared_pool.clone();
-        let mut interval = interval(statics.reaper_rate * 6);
-        let fut = async move {
-            loop {
-                let _i = interval.tick().await;
-                shared_clone.garbage_collect();
-            }
-        };
-        shared_pool.spawn(fut);
-    }
-}
-
-// a shortcut for tokio timeout
-trait CrateTimeOut: Sized + Future {
-    fn timeout(self, dur: std::time::Duration) -> Timeout<Self> {
-        timeout(dur, self)
-    }
-}
-
-impl<F: Future + Send> CrateTimeOut for F {}
