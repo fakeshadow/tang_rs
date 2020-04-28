@@ -104,7 +104,7 @@ impl<M: Manager> PoolLock<M> {
                     pending_new
                 })
             })
-            .expect("Lock poisoned when decrementing spawned count")
+            .unwrap()
     }
 
     pub(crate) fn decr_pending(&self, count: u8) {
@@ -127,7 +127,7 @@ impl<M: Manager> PoolLock<M> {
         }
     }
 
-    // return new pending count as Some(u8).
+    // return new pending count as Option<u8>.
     pub(crate) fn try_drop_conns<F>(&self, min_idle: u8, mut should_drop: F) -> Option<u8>
     where
         F: FnMut(&IdleConn<M>) -> bool,
@@ -164,7 +164,7 @@ impl<M: Manager> PoolLock<M> {
                 inner.conn.push_back(conn);
                 inner.waiters.wake_one_weak()
             })
-            .expect("Lock poisoned when putting back connection")
+            .unwrap()
             .wake();
     }
 
@@ -179,7 +179,7 @@ impl<M: Manager> PoolLock<M> {
                 }
                 inner.waiters.wake_one_weak()
             })
-            .expect("Lock poisoned when putting back connection")
+            .unwrap()
             .wake();
     }
 

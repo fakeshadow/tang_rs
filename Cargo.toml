@@ -1,6 +1,6 @@
 [package]
 name = "tang-rs"
-version = "0.1.0"
+version = "0.1.2"
 authors = ["fakeshadow <24548779@qq.com>"]
 edition = "2018"
 description = "A light weight asynchronous connection pool runs on tokio"
@@ -26,10 +26,6 @@ members = [
   "redis-tang",
 #  "mongodb-tang"
 ]
-
-[dependencies.futures-util]
-version = "0.3.4"
-default-features = false
 
 [dependencies.tokio]
 version = "0.2.16"
