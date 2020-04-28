@@ -398,25 +398,3 @@ impl From<Elapsed> for PostgresPoolError {
         PostgresPoolError::TimeOut
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::PostgresManager;
-    use tang_rs::Builder;
-    use tokio_postgres::NoTls;
-
-    #[tokio::test]
-    async fn test_connection_limit() {
-        let db_url = "postgres://postgres:prisma@localhost/";
-        let mgr = PostgresManager::new_from_stringlike(db_url, NoTls).unwrap();
-
-        let pool = Builder::new()
-            .min_idle(10)
-            .max_size(10)
-            .build(mgr)
-            .await
-            .unwrap();
-
-        assert_eq!(10, pool.state().connections)
-    }
-}

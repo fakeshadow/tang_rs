@@ -121,6 +121,8 @@ async fn main() {
             let conn_ref = &mut *pool_ref;
 
             let _ = tx.send(*conn_ref);
+
+            // when pool_ref goes out of scope the connection is put back to pool.
         });
     }
     drop(tx);

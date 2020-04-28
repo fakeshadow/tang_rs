@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::manager::Manager;
-use crate::Pool;
+use crate::pool::Pool;
 
 pub struct Builder {
     pub(crate) max_size: u8,

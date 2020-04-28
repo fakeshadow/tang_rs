@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use crate::{manager::Manager, util::linked_list::WakerList, IdleConn, ManagedPool};
+use crate::pool::{IdleConn, ManagedPool};
+use crate::{manager::Manager, util::linked_list::WakerList};
 
 #[derive(Debug, Clone)]
 pub struct Pending {
@@ -231,7 +232,7 @@ impl<M: Manager> PoolLockFuture<'_, M> {
     #[inline]
     fn spawn_idle_conn(&self, inner: &mut MutexGuard<'_, PoolInner<M>>) {
         let shared = self.shared_pool;
-        if inner.total() < shared.builder.max_size {
+        if inner.total() < shared.get_builder().max_size {
             let shared_clone = shared.clone();
             shared.spawn(async move {
                 let _ = shared_clone.add_idle_conn().await;
