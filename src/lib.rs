@@ -132,11 +132,6 @@ impl<M: Manager + Send> ManagedPool<M> {
     pub async fn reap_idle_conn(&self) -> Result<(), M::Error> {
         let now = Instant::now();
 
-        println!(
-            "reaping connection. pool state now is: {:#?}",
-            self.pool_lock.state()
-        );
-
         let pending_new = self
             .pool_lock
             .try_drop_conns(self.builder.min_idle, |conn| {

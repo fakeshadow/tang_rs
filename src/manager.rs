@@ -21,7 +21,7 @@ pub trait Manager: Sized + Send + Sync + 'static {
         conn: &'a mut Self::Connection,
     ) -> ManagerFuture<'a, Result<(), Self::Error>>;
 
-    ///  check if a connection is closed
+    /// check if a connection is closed
     fn is_closed(&self, conn: &mut Self::Connection) -> bool;
 
     /// spawn futures on your executor
@@ -30,8 +30,10 @@ pub trait Manager: Sized + Send + Sync + 'static {
         where
             Fut: Future<Output=()> + Send + 'static;
 
-    /// timeout method is used to cancel futures and return a TimeoutError.
-    /// By default we just ignore the timeout error type and return the future directly.
+    /// Used to cancel futures and return `TimeoutError`.
+    /// The duration is determined by `Builder::wait_timeout` or `Builder::connection_timeout`
+    /// By default we just ignore the timeout error and return the future directly.
+    /// Override this method if you actually want to handle the timeout.
     fn timeout<'fu, Fut>(
         &self,
         fut: Fut,
@@ -46,11 +48,21 @@ pub trait Manager: Sized + Send + Sync + 'static {
         })
     }
 
-    fn schedule_inner(shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()>;
+    /// Override this method if you actually want to handle a schedule task.
+    /// The schedule interval is determined by `Builder::reaper_rate`
+    fn schedule_inner(_shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
+        Box::pin(async {})
+    }
 
-    fn garbage_collect_inner(shared_pool: SharedManagedPool<Self>) ->  ManagerFuture<'static, ()>;
+    /// Override this method if you actually want to do some garbage collection.
+    /// The garbage collect interval is determined by `Builder::reaper_rate * 6`
+    fn garbage_collect_inner(_shared_pool: SharedManagedPool<Self>) ->  ManagerFuture<'static, ()> {
+        Box::pin(async {})
+    }
 
-    /// job to do when the pool start.
+    /// Default jobs to do when the pool start.
+    /// You can fully customize your schedule tasks by overriding it.
+    /// (Like run more schedule tasks or at a different interval than the `Builder` collects)
     fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
         self.schedule_reaping(shared_pool);
         self.garbage_collect(shared_pool);

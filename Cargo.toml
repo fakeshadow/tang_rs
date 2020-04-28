@@ -20,6 +20,7 @@ default = []
 [workspace]
 members = [
   "examples/actix-web-example",
+  "examples/basic",
   "examples/rocket",
   "examples/raw",
   "tokio-postgres-tang",
