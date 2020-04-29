@@ -17,7 +17,7 @@
 //! use std::sync::atomic::{AtomicUsize, Ordering};
 //!
 //! use async_std::task;
-//! use tang_rs::{Builder, Manager, ManagerFuture, SharedManagedPool};
+//! use tang_rs::{Builder, Manager, ManagerFuture};
 //!
 //! // our test pool would just generate usize from 0 as connections.
 //! struct TestPoolManager(AtomicUsize);

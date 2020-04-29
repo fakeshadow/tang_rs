@@ -92,10 +92,11 @@ impl<M: Manager + Send> ManagedPool<M> {
 
     async fn check_conn(&self, conn: &mut Conn<M>) -> Result<Result<(), M::Error>, M::Error> {
         let fut = self.manager.is_valid(&mut conn.conn);
-
         let timeout = self.builder.connection_timeout;
 
-        self.manager.timeout(fut, timeout).await?.map(Ok)
+        let res = self.manager.timeout(fut, timeout).await?;
+
+        Ok(res)
     }
 
     async fn replenish_idle_conn(&self, pending_count: u8) -> Result<(), M::Error> {
@@ -274,7 +275,9 @@ impl<M: Manager + Send> Pool<M> {
             let mut conn = shared_pool.manager.timeout(fut, timeout).await?.into();
 
             if shared_pool.builder.always_check {
-                let result = shared_pool.check_conn(&mut conn).await.map_err(|e| {
+                let test = shared_pool.check_conn(&mut conn).await;
+
+                let result = test.map_err(|e| {
                     spawn_drop(shared_pool);
                     e
                 })?;

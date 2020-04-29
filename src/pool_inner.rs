@@ -119,16 +119,20 @@ impl<M: Manager> PoolLock<M> {
     where
         F: FnMut(&Pending) -> bool,
     {
-        let mut inner = self.inner.lock().unwrap();
-        let len = inner.pending.len();
+        self.inner
+            .lock()
+            .map(|mut inner| {
+                let len = inner.pending.len();
 
-        for index in 0..len {
-            if let Some(pending) = inner.pending.get(index) {
-                if should_drop(pending) {
-                    inner.pending.remove(index);
+                for index in 0..len {
+                    if let Some(pending) = inner.pending.get(index) {
+                        if should_drop(pending) {
+                            inner.pending.remove(index);
+                        }
+                    }
                 }
-            }
-        }
+            })
+            .unwrap()
     }
 
     // return new pending count as Option<u8>.
@@ -232,7 +236,9 @@ impl<M: Manager> PoolLockFuture<'_, M> {
     #[inline]
     fn spawn_idle_conn(&self, inner: &mut MutexGuard<'_, PoolInner<M>>) {
         let shared = self.shared_pool;
-        if inner.total() < shared.get_builder().max_size {
+        let builder = shared.get_builder();
+
+        if inner.total() < builder.max_size {
             let shared_clone = shared.clone();
             shared.spawn(async move {
                 let _ = shared_clone.add_idle_conn().await;
