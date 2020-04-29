@@ -263,7 +263,7 @@ async fn idle_test() {
     assert_eq!(4, state.connections);
     assert_eq!(0, state.pending_connections.len());
 
-    let mut interval = async_std::stream::interval(Duration::from_secs(6));
+    let mut interval = interval(Duration::from_secs(6));
 
     interval.next().await;
 

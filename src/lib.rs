@@ -4,7 +4,6 @@
 //! [L3-37](https://github.com/OneSignal/L3-37/)
 //!
 //! # Known Limitation:
-//! No tests.
 //! can't be used in nested runtimes.
 //!
 //! # Example:

@@ -72,8 +72,8 @@ pub trait Manager: Sized + Send + Sync + 'static {
 
     // schedule reaping runs in a spawned future.
     fn schedule_reaping(&self, shared_pool: &SharedManagedPool<Self>) {
-        let statics = shared_pool.get_builder();
-        if statics.max_lifetime.is_some() || statics.idle_timeout.is_some() {
+        let builder = shared_pool.get_builder();
+        if builder.max_lifetime.is_some() || builder.idle_timeout.is_some() {
             let fut = Self::schedule_inner(Arc::downgrade(shared_pool));
             self.spawn(fut);
         }
@@ -81,8 +81,8 @@ pub trait Manager: Sized + Send + Sync + 'static {
 
     // schedule garbage collection runs in a spawned future.
     fn garbage_collect(&self, shared_pool: &SharedManagedPool<Self>) {
-        let statics = shared_pool.get_builder();
-        if statics.use_gc {
+        let builder = shared_pool.get_builder();
+        if builder.use_gc {
             let fut = Self::garbage_collect_inner(Arc::downgrade(shared_pool));
             self.spawn(fut);
         }

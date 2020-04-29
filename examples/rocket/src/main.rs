@@ -1,5 +1,3 @@
-/* This example is not working */
-
 #![feature(proc_macro_hygiene)]
 
 #[macro_use]
@@ -10,11 +8,9 @@ extern crate serde_derive;
 use std::convert::From;
 
 use rocket::{
-    config::{Config, Environment},
     response::{content, Debug},
     State,
 };
-use tokio::runtime::Runtime;
 use tokio_postgres::{
     types::{ToSql, Type},
     Row,
@@ -29,10 +25,8 @@ const IDS: &[u32] = &[
     1, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
 ];
 
-// don't use tokio macro and async main as this will result in nested runtime.
-fn main() {
-    let runtime = Runtime::new().expect("Failed to create tokio runtime");
-
+#[tokio::main]
+async fn main() {
     let db_url = "postgres://postgres:123@localhost/test";
 
     // setup manager
@@ -48,52 +42,37 @@ fn main() {
         .prepare_statement("get_users", "SELECT * FROM users WHERE id=ANY($1)", &[]);
 
     // build postgres pool
-    let pool = runtime
-        .block_on(
-            Builder::new()
-                .always_check(false)
-                .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
-                .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
-                .reaper_rate(std::time::Duration::from_secs(5))
-                .min_idle(1)
-                .max_size(24)
-                .build(mgr),
-        )
-        .unwrap_or_else(|_| panic!("can't make pool"));
+    let pool = Builder::new()
+        .always_check(false)
+        .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
+        .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+        .reaper_rate(std::time::Duration::from_secs(5))
+        .min_idle(1)
+        .max_size(24)
+        .build(mgr)
+        .await
+        .expect("can't make postgres pool");
 
     // setup manager
     let mgr = RedisManager::new("redis://127.0.0.1");
 
-    let pool_redis = runtime
-        .block_on(
-            Builder::new()
-                .always_check(false)
-                .idle_timeout(Some(std::time::Duration::from_secs(60)))
-                .max_lifetime(Some(std::time::Duration::from_secs(2 * 60)))
-                .reaper_rate(std::time::Duration::from_secs(15))
-                .min_idle(1)
-                .max_size(24)
-                .build(mgr),
-        )
-        .unwrap_or_else(|_| panic!("can't make redis pool"));
+    let pool_redis = Builder::new()
+        .always_check(false)
+        .idle_timeout(Some(std::time::Duration::from_secs(60)))
+        .max_lifetime(Some(std::time::Duration::from_secs(2 * 60)))
+        .reaper_rate(std::time::Duration::from_secs(15))
+        .min_idle(1)
+        .max_size(24)
+        .build(mgr)
+        .await
+        .expect("can't make redis pool");
 
-    let cfg = Config::build(Environment::Production)
-        .address("localhost")
-        .port(8000)
-        .workers(24)
-        .keep_alive(10)
-        .expect("Failed to build Rocket Config");
-
-    // build server
-    let server = rocket::custom(cfg)
+    let _ = rocket::ignite()
         .mount("/test", routes![index, index2])
         .manage(pool)
         .manage(pool_redis)
-        .spawn_on(&runtime);
-
-    runtime.block_on(async move {
-        let _ = server.await;
-    });
+        .serve()
+        .await;
 }
 
 #[get("/")]
