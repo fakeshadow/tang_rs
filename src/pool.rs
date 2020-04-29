@@ -275,9 +275,7 @@ impl<M: Manager + Send> Pool<M> {
             let mut conn = shared_pool.manager.timeout(fut, timeout).await?.into();
 
             if shared_pool.builder.always_check {
-                let test = shared_pool.check_conn(&mut conn).await;
-
-                let result = test.map_err(|e| {
+                let result = shared_pool.check_conn(&mut conn).await.map_err(|e| {
                     spawn_drop(shared_pool);
                     e
                 })?;
