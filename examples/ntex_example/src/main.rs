@@ -1,10 +1,13 @@
+// basically the same as actix-web example.
+
 #[macro_use]
 extern crate serde_derive;
 
-use actix_web::{error::ErrorInternalServerError, web, App, Error, HttpResponse, HttpServer};
 use futures_util::TryStreamExt;
+use ntex::web::{
+    self, error::ErrorInternalServerError, types::Data, App, Error, HttpResponse, HttpServer,
+};
 use once_cell::sync::Lazy;
-
 use redis_tang::RedisManager;
 use tokio_postgres::{
     types::{ToSql, Type},
@@ -12,7 +15,6 @@ use tokio_postgres::{
 };
 use tokio_postgres_tang::{Builder, Pool, PostgresManager};
 
-// use once cell for a static tokio-postgres pool. so we don't have to pass the pool to App::data
 static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
     let db_url = "postgres://postgres:123@localhost/test";
 
@@ -27,17 +29,17 @@ static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
 
     Builder::new()
         .always_check(false)
-        .idle_timeout(None)
-        .max_lifetime(None)
+        .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
+        .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+        .reaper_rate(std::time::Duration::from_secs(5))
         .min_idle(1)
         .max_size(24)
         .build_uninitialized(mgr)
         .unwrap_or_else(|e| panic!("{:?}", e))
 });
 
-#[actix_rt::main]
+#[ntex::main]
 async fn main() -> std::io::Result<()> {
-    // initialize tokio-postgres pool.
     POOL.init()
         .await
         .expect("Failed to initialize tokio-postgres pool");
@@ -45,8 +47,9 @@ async fn main() -> std::io::Result<()> {
     let mgr = RedisManager::new("redis://127.0.0.1");
     let pool_redis = Builder::new()
         .always_check(false)
-        .idle_timeout(None)
-        .max_lifetime(None)
+        .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
+        .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+        .reaper_rate(std::time::Duration::from_secs(5))
         .min_idle(1)
         .max_size(24)
         .build(mgr)
@@ -59,7 +62,7 @@ async fn main() -> std::io::Result<()> {
             .service(web::resource("/test").route(web::get().to(test)))
             .service(web::resource("/test/redis").route(web::get().to(test_redis)))
     })
-    .bind("localhost:8000")?
+    .bind("0.0.0.0:8000")?
     .run()
     .await
 }
@@ -119,7 +122,7 @@ async fn test() -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().json(&t))
 }
 
-async fn test_redis(pool: web::Data<Pool<RedisManager>>) -> Result<HttpResponse, Error> {
+async fn test_redis(pool: Data<Pool<RedisManager>>) -> Result<HttpResponse, Error> {
     let mut client = pool
         .get()
         .await

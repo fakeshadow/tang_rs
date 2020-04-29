@@ -1,18 +1,16 @@
 [package]
-name = "tokio-postgres-tang"
+name = "redis_tang"
 version = "0.1.0"
 authors = ["fakeshadow <24548779@qq.com>"]
 edition = "2018"
 
-[dependencies.futures-util]
-version = "0.3.4"
+[dependencies.redis]
+version = "0.15.1"
 default-features = false
+features = ["tokio-rt-core"]
 
 [dependencies.tang-rs]
 path = "../"
-
-[dependencies.tokio-postgres]
-version = "0.5.3"
 
 [dependencies.tokio]
 version = "0.2.19"

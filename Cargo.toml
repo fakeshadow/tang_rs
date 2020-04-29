@@ -19,14 +19,15 @@ default = []
 
 [workspace]
 members = [
-    "examples/actix-web-example",
-    "examples/basic",
-    "examples/rocket",
-    "examples/raw",
+    "examples/actix_web_example",
+    "examples/basic_example",
+    "examples/ntex_example",
+    "examples/rocket_example",
+    "examples/raw_example",
     "examples/tide_example",
-    "tokio-postgres-tang",
-    "redis-tang",
-    "mongodb-tang"
+    "tokio_postgres_tang",
+    "redis_tang",
+    "mongodb_tang"
 ]
 
 [dev-dependencies.async-std]

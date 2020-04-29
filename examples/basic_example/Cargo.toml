@@ -1,5 +1,5 @@
 [package]
-name = "basic"
+name = "basic_example"
 version = "0.1.0"
 workspace = "../../"
 edition = "2018"

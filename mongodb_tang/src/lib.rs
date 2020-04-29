@@ -1,6 +1,5 @@
 use std::fmt;
 use std::future::Future;
-use std::pin::Pin;
 use std::time::Duration;
 
 use bson::doc;
@@ -49,7 +48,7 @@ impl Manager for MongoManager {
     fn is_valid<'a>(
         &'a self,
         conn: &'a mut Self::Connection,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
+    ) -> ManagerFuture<'a, Result<(), Self::Error>> {
         Box::pin(async move {
             let db = conn.database(&self.ping_db_name);
             let _ = db.run_command(doc! { "ping" => 1 }, None)?;

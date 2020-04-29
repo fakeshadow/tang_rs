@@ -2,7 +2,6 @@ pub use tang_rs::{Builder, Pool, PoolRef};
 
 use std::fmt;
 use std::future::Future;
-use std::pin::Pin;
 use std::time::Duration;
 
 use redis::{aio::MultiplexedConnection, Client, IntoConnectionInfo, RedisError};
@@ -36,9 +35,9 @@ impl Manager for RedisManager {
     }
 
     fn is_valid<'a>(
-        &'a self,
+        &self,
         c: &'a mut Self::Connection,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
+    ) -> ManagerFuture<'a, Result<(), Self::Error>> {
         Box::pin(async move {
             let _ = redis::cmd("PING").query_async(c).await?;
             Ok(())

@@ -41,7 +41,7 @@ impl Manager for AsyncPostgresManager {
     }
 
     fn is_valid<'a>(
-        &'a self,
+        &self,
         conn: &'a mut Self::Connection,
     ) -> ManagerFuture<'a, Result<(), Self::Error>> {
         Box::pin(async move {
@@ -110,9 +110,9 @@ async fn main() -> async_std::io::Result<()> {
         .expect("can't make postgres pool");
 
     let mut app = tide::with_state(pool);
-    app.at("/").get(index);
+    app.at("/test").get(index);
 
-    app.listen("localhost:8080").await
+    app.listen("0.0.0.0:8000").await
 }
 
 // dummy data

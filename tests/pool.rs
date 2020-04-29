@@ -28,7 +28,7 @@ impl Manager for TestPoolManager {
     }
 
     fn is_valid<'a>(
-        &'a self,
+        &self,
         conn: &'a mut Self::Connection,
     ) -> ManagerFuture<'a, Result<(), Self::Error>> {
         Box::pin(async move {
@@ -176,7 +176,7 @@ async fn retry_limit() {
         }
 
         fn is_valid<'a>(
-            &'a self,
+            &self,
             conn: &'a mut Self::Connection,
         ) -> ManagerFuture<'a, Result<(), Self::Error>> {
             Box::pin(async move {
@@ -212,20 +212,18 @@ async fn retry_limit() {
         .await
         .expect("fail to build pool");
 
-    let mut interval = interval(Duration::from_secs(1));
-
     let conn0 = pool.get().await;
     assert_eq!(true, conn0.is_ok());
     let conn1 = pool.get().await;
     assert_eq!(true, conn1.is_err());
-
-    interval.next().await;
 
     let conn2 = pool.get().await;
     assert_eq!(true, conn2.is_ok());
 
     assert_eq!(true, *(conn0.unwrap()) == 0);
     assert_eq!(true, *(conn2.unwrap()) == 5);
+
+    let mut interval = interval(Duration::from_secs(1));
 
     interval.next().await;
 

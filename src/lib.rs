@@ -49,7 +49,7 @@
 //!     }
 //!
 //!     fn is_valid<'a>(
-//!         &'a self,
+//!         &self,
 //!         _conn: &'a mut Self::Connection,
 //!     ) -> ManagerFuture<'a, Result<(), Self::Error>> {
 //!         Box::pin(async {

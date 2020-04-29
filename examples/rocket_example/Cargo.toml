@@ -1,5 +1,5 @@
 [package]
-name = "tang-example-rocket"
+name = "rocket_example"
 version = "0.1.0"
 workspace = "../../"
 edition = "2018"
@@ -13,8 +13,8 @@ version = "0.15.1"
 default-features = false
 features = ["tokio-rt-core"]
 
-[dependencies.redis-tang]
-path = "../../redis-tang"
+[dependencies.redis_tang]
+path = "../../redis_tang"
 
 [dependencies.rocket]
 git = "https://github.com/SergioBenitez/Rocket"
@@ -37,6 +37,6 @@ features = ["full"]
 [dependencies.tokio-postgres]
 version = "0.5.3"
 
-[dependencies.tokio-postgres-tang]
-path = "../../tokio-postgres-tang"
+[dependencies.tokio_postgres_tang]
+path = "../../tokio_postgres_tang"
 

@@ -1,0 +1,36 @@
+[package]
+name = "ntex_example"
+version = "0.1.0"
+workspace = "../../"
+edition = "2018"
+publish = false
+
+[dependencies.futures-util]
+version = "0.3.4"
+
+[dependencies.ntex]
+git = "https://github.com/ntex-rs/ntex"
+
+[dependencies.once_cell]
+version = "1.2.0"
+
+[dependencies.redis_tang]
+path = "../../redis_tang"
+
+[dependencies.redis]
+version = "0.15.1"
+default-features = false
+features = ["tokio-rt-core"]
+
+[dependencies.serde]
+version = "1.0.101"
+default-features = false
+
+[dependencies.serde_derive]
+version = "1.0.101"
+
+[dependencies.tokio-postgres]
+version = "0.5.3"
+
+[dependencies.tokio_postgres_tang]
+path = "../../tokio_postgres_tang"

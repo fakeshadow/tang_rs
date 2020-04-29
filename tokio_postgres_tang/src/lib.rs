@@ -188,9 +188,9 @@ where
     }
 
     fn is_valid<'a>(
-        &'a self,
+        &self,
         c: &'a mut Self::Connection,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>> {
+    ) -> ManagerFuture<'a, Result<(), Self::Error>> {
         Box::pin(c.0.simple_query("").map_ok(|_| ()).err_into())
     }
 
