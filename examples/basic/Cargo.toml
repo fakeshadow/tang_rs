@@ -1,8 +1,9 @@
 [package]
 name = "basic"
 version = "0.1.0"
-authors = ["fakeshadow <24548779@qq.com>"]
+workspace = "../../"
 edition = "2018"
+publish = false
 
 [dependencies.tang-rs]
 path = "../../"

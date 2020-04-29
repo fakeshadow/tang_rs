@@ -1,0 +1,35 @@
+[package]
+name = "tide_example"
+version = "0.1.0"
+workspace = "../../"
+edition = "2018"
+publish = false
+
+[dependencies.async-std]
+version = "1.5.0"
+features = ["attributes"]
+
+[dependencies.async-postgres]
+version = "0.5.0"
+
+[dependencies.futures-util]
+version = "0.3.4"
+
+[dependencies.serde]
+version = "1.0.101"
+default-features = false
+
+[dependencies.serde_derive]
+version = "1.0.101"
+
+[dependencies.serde_json]
+version = "1.0.40"
+
+[dependencies.tang-rs]
+path = "../../"
+
+[dependencies.tokio-postgres]
+version = "0.5.2"
+
+[dependencies.tide]
+version = "0.8.0"
