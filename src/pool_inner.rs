@@ -8,7 +8,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use crate::pool::{IdleConn, ManagedPool};
-use crate::{manager::Manager, util::linked_list::WakerList};
+use crate::{manager::Manager, util::linked_list::WakerList, PoolRef};
 
 #[derive(Debug, Clone)]
 pub struct Pending {
@@ -203,7 +203,7 @@ impl<M: Manager> PoolLock<M> {
     }
 }
 
-// `PoolLockFuture` return a future of `IdleConn`. In the `Future` we pass it's `Waker` to `PoolLock`.
+// `PoolLockFuture` return a future of `PoolRef`. In the `Future` we pass it's `Waker` to `PoolLock`.
 // Then when a `IdleConn` is returned to pool we lock the `PoolLock` and wake the `Wakers` inside it to notify other `PoolLockFuture` it's time to continue.
 pub(crate) struct PoolLockFuture<'a, M: Manager> {
     shared_pool: &'a Arc<ManagedPool<M>>,
@@ -221,13 +221,16 @@ impl<M: Manager> Drop for PoolLockFuture<'_, M> {
     }
 }
 
-impl<M: Manager> PoolLockFuture<'_, M> {
+impl<'re, M: Manager> PoolLockFuture<'re, M> {
     #[inline]
-    fn poll_idle_conn(&mut self, inner: &mut MutexGuard<'_, PoolInner<M>>) -> Poll<IdleConn<M>> {
+    fn poll_pool_ref(
+        &mut self,
+        inner: &mut MutexGuard<'re, PoolInner<M>>,
+    ) -> Poll<PoolRef<'re, M>> {
         match inner.conn.pop_front() {
             Some(conn) => {
                 self.acquired = true;
-                Poll::Ready(conn)
+                Poll::Ready(PoolRef::new(conn, self.shared_pool))
             }
             None => Poll::Pending,
         }
@@ -261,14 +264,14 @@ impl<M: Manager> PoolLockFuture<'_, M> {
     }
 }
 
-impl<M: Manager> Future for PoolLockFuture<'_, M> {
-    type Output = IdleConn<M>;
+impl<'re, M: Manager> Future for PoolLockFuture<'re, M> {
+    type Output = PoolRef<'re, M>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut inner = self.pool_lock.inner.lock().unwrap();
 
         // poll a connection and use the result to mutate PoolLockFuture state as well as PoolInner state.
-        let poll = self.poll_idle_conn(&mut inner);
+        let poll = self.poll_pool_ref(&mut inner);
 
         // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
         match self.wait_key {

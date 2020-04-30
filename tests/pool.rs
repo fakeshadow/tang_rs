@@ -131,22 +131,23 @@ async fn test_valid_closed() {
         .await
         .expect("fail to build pool");
 
+    let mut interval = interval(Duration::from_secs(1));
+
     let conn0 = pool.get().await;
+    interval.next().await;
     assert_eq!(true, conn0.is_ok());
 
     let conn1 = pool.get().await;
+    interval.next().await;
     assert_eq!(true, conn1.is_ok());
 
     let conn2 = pool.get().await;
+    interval.next().await;
     assert_eq!(true, conn2.is_ok());
 
     assert_eq!(true, *(conn0.unwrap()) == 0);
     assert_eq!(true, *(conn1.unwrap()) == 2);
     assert_eq!(true, *(conn2.unwrap()) == 4);
-
-    let mut interval = interval(Duration::from_secs(1));
-
-    interval.next().await;
 
     for _i in 0..4 {
         let conn = pool.get().await;
@@ -212,18 +213,22 @@ async fn retry_limit() {
         .await
         .expect("fail to build pool");
 
+    let mut interval = interval(Duration::from_secs(1));
+
     let conn0 = pool.get().await;
+    interval.next().await;
     assert_eq!(true, conn0.is_ok());
+
     let conn1 = pool.get().await;
+    interval.next().await;
     assert_eq!(true, conn1.is_err());
 
     let conn2 = pool.get().await;
+    interval.next().await;
     assert_eq!(true, conn2.is_ok());
 
     assert_eq!(true, *(conn0.unwrap()) == 0);
     assert_eq!(true, *(conn2.unwrap()) == 5);
-
-    let mut interval = interval(Duration::from_secs(1));
 
     interval.next().await;
 

@@ -1,5 +1,5 @@
 // This example shows how to implement the pool on async_std runtime.
-// Most of the xxx-tang is implemented with tokio runtime so they can be seen as examples on that matter.
+// Most of the xxx-tang are implemented with tokio runtime so they can be seen as examples on that matter.
 
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;

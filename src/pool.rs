@@ -90,8 +90,8 @@ impl<M: Manager + Send> ManagedPool<M> {
         Ok(())
     }
 
-    async fn check_conn(&self, conn: &mut Conn<M>) -> Result<Result<(), M::Error>, M::Error> {
-        let fut = self.manager.is_valid(&mut conn.conn);
+    async fn check_conn(&self, conn: &mut M::Connection) -> Result<Result<(), M::Error>, M::Error> {
+        let fut = self.manager.is_valid(conn);
         let timeout = self.builder.connection_timeout;
 
         let res = self.manager.timeout(fut, timeout).await?;
@@ -229,12 +229,7 @@ impl<M: Manager + Send> Pool<M> {
     /// Return a reference of `SharedManagedPool<Manager>` and a `Option<Manager::Connection>`.
     /// The `PoolRef` should be drop asap when you finish the use of it.
     pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
-        let conn = self.get_conn(0).await?;
-
-        Ok(PoolRef {
-            conn: Some(conn),
-            pool: &self.0,
-        })
+        self.get_conn(0).await
     }
 
     /// Run the pool with a closure.
@@ -245,53 +240,45 @@ impl<M: Manager + Send> Pool<M> {
         E: From<M::Error>,
         T: Send + 'static,
     {
-        let mut conn = self.get_conn(0).await?;
-
-        let result = f(&mut conn.conn).await;
-
-        // only check if the connection is broken when we get an error from result
-        let broken = if result.is_err() {
-            self.0.manager.is_closed(&mut conn.conn)
-        } else {
-            false
-        };
-
-        if broken {
-            spawn_drop(&self.0);
-        } else {
-            self.0.pool_lock.put_back(conn.into())
-        }
-        result
+        let mut pool_ref = self.get_conn(0).await?;
+        f(&mut *pool_ref).await
     }
 
     // Recursive when the connection is broken(When enabling the always_check). We exit with at most 3 retries and return an error.
-    fn get_conn(&self, mut retry: u8) -> ManagerFuture<Result<Conn<M>, M::Error>> {
+    fn get_conn(&self, mut retry: u8) -> ManagerFuture<Result<PoolRef<'_, M>, M::Error>> {
         Box::pin(async move {
             let shared_pool = &self.0;
 
             let fut = shared_pool.pool_lock.lock(shared_pool);
             let timeout = shared_pool.builder.wait_timeout;
 
-            let mut conn = shared_pool.manager.timeout(fut, timeout).await?.into();
+            let mut pool_ref = shared_pool.manager.timeout(fut, timeout).await?;
 
             if shared_pool.builder.always_check {
-                let result = shared_pool.check_conn(&mut conn).await.map_err(|e| {
-                    spawn_drop(shared_pool);
-                    e
-                })?;
+                let result = shared_pool.check_conn(&mut *pool_ref).await;
 
-                if let Err(e) = result {
-                    spawn_drop(shared_pool);
-                    if retry == 3 {
-                        return Err(e);
-                    } else {
-                        retry += 1;
-                        return self.get_conn(retry).await;
+                match result {
+                    Ok(result) => {
+                        if let Err(e) = result {
+                            pool_ref.take_conn();
+                            drop(pool_ref);
+                            return if retry == 3 {
+                                Err(e)
+                            } else {
+                                retry += 1;
+                                self.get_conn(retry).await
+                            };
+                        }
+                    }
+                    Err(timeout) => {
+                        pool_ref.take_conn();
+                        drop(pool_ref);
+                        return Err(timeout);
                     }
                 }
             };
 
-            Ok(conn)
+            Ok(pool_ref)
         })
     }
 
@@ -309,6 +296,15 @@ impl<M: Manager + Send> Pool<M> {
 pub struct PoolRef<'a, M: Manager + Send> {
     conn: Option<Conn<M>>,
     pool: &'a Arc<ManagedPool<M>>,
+}
+
+impl<'a, M: Manager + Send> PoolRef<'a, M> {
+    pub(crate) fn new(conn: IdleConn<M>, pool: &'a Arc<ManagedPool<M>>) -> Self {
+        PoolRef {
+            conn: Some(conn.into()),
+            pool,
+        }
+    }
 }
 
 impl<M: Manager + Send> Deref for PoolRef<'_, M> {
@@ -356,7 +352,7 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
         let mut conn = match self.conn.take() {
             Some(conn) => conn,
             None => {
-                self.pool.pool_lock.decr_spawned(|_| None);
+                spawn_drop(self.pool);
                 return;
             }
         };
