@@ -81,14 +81,13 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use futures_util::{future::join_all, FutureExt, TryFutureExt};
+use tang_rs::{Manager, ManagerFuture, WeakSharedManagedPool};
 use tokio::time::{interval, timeout, Elapsed};
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
     types::Type,
     Client, Config, Error, Socket, Statement,
 };
-
-use tang_rs::{Manager, ManagerFuture, WeakSharedManagedPool};
 
 pub struct PostgresManager<Tls>
 where

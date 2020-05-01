@@ -3,16 +3,35 @@ name = "redis_tang"
 version = "0.1.0"
 authors = ["fakeshadow <24548779@qq.com>"]
 edition = "2018"
+description = "A light weight asynchronous connection pool for redis-rs"
+keywords = ["async", "redis", "pool"]
+license = "MIT"
+repository = "https://github.com/fakeshadow/tang_rs"
+readme= "README.md"
+
+[lib]
+name = "redis_tang"
+path = "src/lib.rs"
+
+[features]
+default = ["with-tokio"]
+with-tokio = ["redis/tokio-rt-core", "tokio/rt-threaded", "tokio/time"]
+with-async-std = ["async-std/unstable", "redis/async-std-comp"]
+
+[dependencies.async-std]
+version = "1.5.0"
+default-features = false
+optional = true
 
 [dependencies.redis]
-version = "0.15.1"
+git = "https://github.com/mitsuhiko/redis-rs.git"
 default-features = false
-features = ["tokio-rt-core"]
+optional = true
 
 [dependencies.tang-rs]
 path = "../"
 
 [dependencies.tokio]
-version = "0.2.19"
+version = "0.2.20"
 default-features = false
-features = ["rt-threaded", "time"]
+optional = true

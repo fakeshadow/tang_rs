@@ -7,8 +7,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use crate::pool::{IdleConn, ManagedPool};
-use crate::{manager::Manager, util::linked_list::WakerList, PoolRef};
+use crate::{
+    manager::Manager,
+    pool::{IdleConn, ManagedPool, PoolRef},
+    util::linked_list::WakerList,
+};
 
 #[derive(Debug, Clone)]
 pub struct Pending {

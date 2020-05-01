@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_std::{prelude::*, stream::interval, task};
-use tang_rs::{Builder, Manager, ManagerFuture, WeakSharedManagedPool};
+use tang_rs::{Builder, Manager, ManagerFuture, PoolRef, WeakSharedManagedPool};
 
 struct TestPoolManager(AtomicUsize);
 
@@ -213,22 +213,31 @@ async fn retry_limit() {
         .await
         .expect("fail to build pool");
 
+    let mut errs = 0;
+
+    let f = |errs: &mut i32, result: Result<PoolRef<'_, TestPoolManagerRetry>, TestPoolError>| {
+        if result.is_ok() {
+            let conn = *(result.unwrap());
+            assert_eq!(true, conn == 0 || conn == 5);
+        } else {
+            *errs = *errs + 1;
+        }
+    };
+
     let mut interval = interval(Duration::from_secs(1));
 
     let conn0 = pool.get().await;
     interval.next().await;
-    assert_eq!(true, conn0.is_ok());
-
     let conn1 = pool.get().await;
     interval.next().await;
-    assert_eq!(true, conn1.is_err());
-
     let conn2 = pool.get().await;
     interval.next().await;
-    assert_eq!(true, conn2.is_ok());
 
-    assert_eq!(true, *(conn0.unwrap()) == 0);
-    assert_eq!(true, *(conn2.unwrap()) == 5);
+    f(&mut errs, conn0);
+    f(&mut errs, conn1);
+    f(&mut errs, conn2);
+
+    assert_eq!(true, errs == 1);
 
     interval.next().await;
 
