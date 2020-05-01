@@ -80,9 +80,17 @@ use std::str::FromStr;
 use std::sync::RwLock;
 use std::time::Duration;
 
-use futures_util::{future::join_all, FutureExt, TryFutureExt};
+#[cfg(feature = "with-async-std")]
+use async_std::{
+    future::{timeout, TimeoutError},
+    prelude::StreamExt,
+    stream::interval,
+    task,
+};
+use futures_util::{future::join_all, TryFutureExt};
 use tang_rs::{Manager, ManagerFuture, WeakSharedManagedPool};
-use tokio::time::{interval, timeout, Elapsed};
+#[cfg(feature = "with-tokio")]
+use tokio::time::{interval, timeout, Elapsed as TimeoutError};
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
     types::Type,
@@ -144,117 +152,149 @@ where
     }
 }
 
-impl<Tls> Manager for PostgresManager<Tls>
-where
-    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
-    Tls::Stream: Send,
-    Tls::TlsConnect: Send,
-    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
-{
-    type Connection = (Client, HashMap<String, Statement>);
-    type Error = PostgresPoolError;
-    type TimeoutError = Elapsed;
+macro_rules! impl_manager {
+    ($connection: ty, $spawn: path, $timeout: ident, $interval_tick: ident) => {
+        impl<Tls> Manager for PostgresManager<Tls>
+        where
+            Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
+            Tls::Stream: Send,
+            Tls::TlsConnect: Send,
+            <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
+        {
+            type Connection = $connection;
+            type Error = PostgresPoolError;
+            type TimeoutError = TimeoutError;
 
-    fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
-        Box::pin(async move {
-            let (c, conn) = self.config.connect(self.tls.clone()).await?;
-            tokio::spawn(conn.map(|_| ()));
+            fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
+                Box::pin(async move {
+                    #[cfg(feature = "with-tokio")]
+                    let (c, conn) = self.config.connect(self.tls.clone()).await?;
 
-            let prepares = self
-                .prepares
-                .read()
-                .expect("Failed to lock/read prepared statements")
-                .clone();
+                    // ToDo: fix this error convertion.
+                    #[cfg(feature = "with-async-std")]
+                    let (c, conn) = async_postgres::connect(self.config.clone())
+                        .await
+                        .map_err(|_| PostgresPoolError::TimeOut)?;
 
-            let mut sts = HashMap::with_capacity(prepares.len());
-            let mut futures = Vec::with_capacity(prepares.len());
+                    $spawn(async move {
+                        let _ = conn.await;
+                    });
 
-            // make prepared statements if there is any and set manager prepares for later use.
-            for p in prepares.iter() {
-                let (alias, PreparedStatement(query, types)) = p;
-                let alias = alias.to_string();
-                let future = c.prepare_typed(query, &types).map_ok(|st| (alias, st));
-                futures.push(future);
-            }
+                    let prepares = self
+                        .prepares
+                        .read()
+                        .expect("Failed to lock/read prepared statements")
+                        .clone();
 
-            for result in join_all(futures).await.into_iter() {
-                let (alias, st) = result?;
-                sts.insert(alias, st);
-            }
+                    let mut sts = HashMap::with_capacity(prepares.len());
+                    let mut futures = Vec::with_capacity(prepares.len());
 
-            Ok((c, sts))
-        })
-    }
-
-    fn is_valid<'a>(
-        &self,
-        c: &'a mut Self::Connection,
-    ) -> ManagerFuture<'a, Result<(), Self::Error>> {
-        Box::pin(c.0.simple_query("").map_ok(|_| ()).err_into())
-    }
-
-    fn is_closed(&self, conn: &mut Self::Connection) -> bool {
-        conn.0.is_closed()
-    }
-
-    fn spawn<Fut>(&self, fut: Fut)
-    where
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        tokio::spawn(fut);
-    }
-
-    fn timeout<'fu, Fut>(
-        &self,
-        fut: Fut,
-        dur: Duration,
-    ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
-    where
-        Fut: Future + Send + 'fu,
-    {
-        Box::pin(timeout(dur, fut))
-    }
-
-    fn schedule_inner(shared_pool: WeakSharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
-        let rate = shared_pool
-            .upgrade()
-            .expect("Pool is gone before we start schedule work")
-            .get_builder()
-            .get_reaper_rate();
-        let mut interval = interval(rate);
-        Box::pin(async move {
-            loop {
-                let _i = interval.tick().await;
-                match shared_pool.upgrade() {
-                    Some(shared_pool) => {
-                        let _ = shared_pool.reap_idle_conn().await;
+                    // make prepared statements if there is any and set manager prepares for later use.
+                    for p in prepares.iter() {
+                        let (alias, PreparedStatement(query, types)) = p;
+                        let alias = alias.to_string();
+                        let future = c.prepare_typed(query, &types).map_ok(|st| (alias, st));
+                        futures.push(future);
                     }
-                    None => break,
-                }
-            }
-        })
-    }
 
-    fn garbage_collect_inner(
-        shared_pool: WeakSharedManagedPool<Self>,
-    ) -> ManagerFuture<'static, ()> {
-        let rate = shared_pool
-            .upgrade()
-            .expect("Pool is gone before we start garbage collection")
-            .get_builder()
-            .get_reaper_rate();
-        let mut interval = interval(rate * 6);
-        Box::pin(async move {
-            loop {
-                let _i = interval.tick().await;
-                match shared_pool.upgrade() {
-                    Some(shared_pool) => shared_pool.garbage_collect(),
-                    None => break,
-                }
+                    for result in join_all(futures).await.into_iter() {
+                        let (alias, st) = result?;
+                        sts.insert(alias, st);
+                    }
+
+                    Ok((c, sts))
+                })
             }
-        })
-    }
+
+            fn is_valid<'a>(
+                &self,
+                c: &'a mut Self::Connection,
+            ) -> ManagerFuture<'a, Result<(), Self::Error>> {
+                Box::pin(c.0.simple_query("").map_ok(|_| ()).err_into())
+            }
+
+            fn is_closed(&self, conn: &mut Self::Connection) -> bool {
+                conn.0.is_closed()
+            }
+
+            fn spawn<Fut>(&self, fut: Fut)
+            where
+                Fut: Future<Output = ()> + Send + 'static,
+            {
+                $spawn(fut);
+            }
+
+            fn timeout<'fu, Fut>(
+                &self,
+                fut: Fut,
+                dur: Duration,
+            ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
+            where
+                Fut: Future + Send + 'fu,
+            {
+                Box::pin($timeout(dur, fut))
+            }
+
+            fn schedule_inner(
+                shared_pool: WeakSharedManagedPool<Self>,
+            ) -> ManagerFuture<'static, ()> {
+                let rate = shared_pool
+                    .upgrade()
+                    .expect("Pool is gone before we start schedule work")
+                    .get_builder()
+                    .get_reaper_rate();
+                let mut interval = interval(rate);
+                Box::pin(async move {
+                    loop {
+                        let _i = interval.$interval_tick().await;
+                        match shared_pool.upgrade() {
+                            Some(shared_pool) => {
+                                let _ = shared_pool.reap_idle_conn().await;
+                            }
+                            None => break,
+                        }
+                    }
+                })
+            }
+
+            fn garbage_collect_inner(
+                shared_pool: WeakSharedManagedPool<Self>,
+            ) -> ManagerFuture<'static, ()> {
+                let rate = shared_pool
+                    .upgrade()
+                    .expect("Pool is gone before we start garbage collection")
+                    .get_builder()
+                    .get_reaper_rate();
+                let mut interval = interval(rate * 6);
+                Box::pin(async move {
+                    loop {
+                        let _i = interval.$interval_tick().await;
+                        match shared_pool.upgrade() {
+                            Some(shared_pool) => shared_pool.garbage_collect(),
+                            None => break,
+                        }
+                    }
+                })
+            }
+        }
+    };
 }
+
+#[cfg(feature = "with-tokio")]
+impl_manager!(
+    (Client, HashMap<String, Statement>),
+    tokio::spawn,
+    timeout,
+    tick
+);
+
+#[cfg(feature = "with-async-std")]
+impl_manager!(
+    (Client, HashMap<String, Statement>),
+    task::spawn,
+    timeout,
+    next
+);
 
 impl<Tls> fmt::Debug for PostgresManager<Tls>
 where
@@ -412,8 +452,8 @@ impl From<Error> for PostgresPoolError {
     }
 }
 
-impl From<Elapsed> for PostgresPoolError {
-    fn from(_e: Elapsed) -> PostgresPoolError {
+impl From<TimeoutError> for PostgresPoolError {
+    fn from(_e: TimeoutError) -> PostgresPoolError {
         PostgresPoolError::TimeOut
     }
 }

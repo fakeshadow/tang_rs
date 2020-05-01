@@ -6,7 +6,7 @@ edition = "2018"
 publish = false
 
 [dependencies.redis]
-version = "0.15.1"
+git = "https://github.com/mitsuhiko/redis-rs.git"
 default-features = false
 features = ["tokio-rt-core"]
 
