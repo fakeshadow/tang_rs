@@ -9,27 +9,26 @@ publish = false
 version = "1.5.0"
 features = ["attributes"]
 
-[dependencies.async-postgres]
-version = "0.5.0"
-
 [dependencies.futures-util]
 version = "0.3.4"
 
-[dependencies.serde]
-version = "1.0.101"
+[dependencies.redis]
+git = "https://github.com/mitsuhiko/redis-rs.git"
 default-features = false
+features = ["async-std-comp"]
 
-[dependencies.serde_derive]
-version = "1.0.101"
-
-[dependencies.serde_json]
-version = "1.0.40"
-
-[dependencies.tang-rs]
-path = "../../"
-
-[dependencies.tokio-postgres]
-version = "0.5.2"
+[dependencies.redis_tang]
+path = "../../redis_tang"
+default-features = false
+features = ["with-async-std"]
 
 [dependencies.tide]
 version = "0.8.0"
+
+[dependencies.tokio-postgres]
+version = "0.5.3"
+
+[dependencies.tokio_postgres_tang]
+path = "../../tokio_postgres_tang"
+default-features = false
+features = ["with-async-std"]

@@ -10,7 +10,7 @@ use async_std::{
     task,
 };
 use std::time::Duration;
-use tang_rs::{Builder, Manager, ManagerFuture, SharedManagedPool};
+use tang_rs::{Builder, Manager, ManagerFuture, WeakSharedManagedPool};
 
 // our test pool would just generate usize from 0 as connections.
 struct TestPoolManager(AtomicUsize);
@@ -85,7 +85,7 @@ impl Manager for TestPoolManager {
     }
 
     // override the schedule_inner method to run schedule task to go over all the connections.
-    fn schedule_inner(_shared_pool: SharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
+    fn schedule_inner(_shared_pool: WeakSharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
         Box::pin(async move {
             // do something
         })
@@ -106,16 +106,18 @@ async fn main() {
         .await
         .expect("fail to build pool");
 
-    let (tx, rx) = async_std::sync::channel(100);
+    let (tx, rx) = async_std::sync::channel(1000000);
 
     // spawn 24 futures and pull connections from pool at the same time.
-    for _i in 0..24 {
+    let now = std::time::Instant::now();
+    for _i in 0..1000000 {
         let pool = pool.clone();
         let tx = tx.clone();
         task::spawn(async move {
             let mut pool_ref = pool.get().await.expect("fail to get PoolRef");
-            let conn_ref = &*pool_ref;
-            println!("we have the reference of a connection : {:?}", conn_ref);
+
+            // we can get &Mananger::Connection from pool_ref
+            let _conn_ref = &*pool_ref;
 
             // we can also get a mut reference from pool_ref
             let conn_ref = &mut *pool_ref;
@@ -127,7 +129,9 @@ async fn main() {
     }
     drop(tx);
 
-    while let Some(_connection) = rx.recv().await {
+    while let Some(_conn) = rx.recv().await {
         // We just wait until all connections are pulled out once
     }
+    let duration = std::time::Instant::now().duration_since(now);
+    println!("Total time is : {:#?}", duration);
 }
