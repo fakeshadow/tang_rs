@@ -55,16 +55,47 @@ pub struct ManagedPool<M: Manager + Send> {
 }
 
 impl<M: Manager + Send> ManagedPool<M> {
+    // Recursive if the connection is broken when `Builder.always_check == true`. We exit with at most 3 retries.
+    fn get_conn<'a>(
+        &'a self,
+        shared_pool: &'a SharedManagedPool<M>,
+        mut retry: u8,
+    ) -> ManagerFuture<Result<PoolRef<'a, M>, M::Error>> {
+        Box::pin(async move {
+            let fut = self.pool_lock.lock(shared_pool);
+            let timeout = self.builder.wait_timeout;
+
+            let mut pool_ref = self.manager.timeout(fut, timeout).await?;
+
+            if self.builder.always_check {
+                let result = self.check_conn(&mut *pool_ref).await;
+
+                match result {
+                    Ok(result) => {
+                        if let Err(e) = result {
+                            pool_ref.take_drop();
+                            return if retry == 3 {
+                                Err(e)
+                            } else {
+                                retry += 1;
+                                self.get_conn(shared_pool, retry).await
+                            };
+                        }
+                    }
+                    Err(timeout) => {
+                        pool_ref.take_drop();
+                        return Err(timeout);
+                    }
+                }
+            };
+            Ok(pool_ref)
+        })
+    }
+
     fn drop_conn(&self) -> Option<u8> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
-        self.pool_lock.decr_spawned(|total_now| {
-            if total_now < self.builder.min_idle {
-                Some(self.builder.min_idle - total_now)
-            } else {
-                None
-            }
-        })
+        self.pool_lock.decr_spawned(self.builder.min_idle)
     }
 
     pub(crate) async fn add_idle_conn(&self) -> Result<(), M::Error> {
@@ -91,6 +122,7 @@ impl<M: Manager + Send> ManagedPool<M> {
 
     async fn check_conn(&self, conn: &mut M::Connection) -> Result<Result<(), M::Error>, M::Error> {
         let fut = self.manager.is_valid(conn);
+
         let timeout = self.builder.connection_timeout;
 
         let res = self.manager.timeout(fut, timeout).await?;
@@ -184,13 +216,13 @@ impl<M: Manager + Send> Pool<M> {
     }
 
     /// manually initialize pool. this is usually called when the `Pool` is built with `build_uninitialized`
-    /// This is useful when you want to make a empty `Pool` and init it later.
+    /// This is useful when you want to make an empty `Pool` and initialize it later.
     /// # example:
     /// ```ignore
     /// #[macro_use]
     /// extern crate lazy_static;
     ///
-    /// use tang_rs::{Pool, PostgresManager, Builder};
+    /// use tokio_postgres_tang::{Pool, PostgresManager, Builder};
     /// use tokio_postgres::NoTls;
     ///
     /// lazy_static! {
@@ -225,58 +257,24 @@ impl<M: Manager + Send> Pool<M> {
         Ok(())
     }
 
-    /// Return a reference of `SharedManagedPool<Manager>` and a `Option<Manager::Connection>`.
-    /// The `PoolRef` should be drop asap when you finish the use of it.
+    /// Return a `PoolRef` contains reference of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
+    ///
+    /// The `PoolRef` should be dropped asap when you finish the use of it. Hold it in scope would prevent the connection from pushed back to pool.
     pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
-        self.get_conn(0).await
+        let shared_pool = &self.0;
+        shared_pool.get_conn(shared_pool, 0).await
     }
 
     /// Run the pool with a closure.
-    /// Usually slightly faster than `Pool.get()` as we only do conditional broken check according to the closure result.
     pub async fn run<T, E, F>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + '_>>,
         E: From<M::Error>,
         T: Send + 'static,
     {
-        let mut pool_ref = self.get_conn(0).await?;
+        let shared_pool = &self.0;
+        let mut pool_ref = shared_pool.get_conn(shared_pool, 0).await?;
         f(&mut *pool_ref).await
-    }
-
-    // Recursive if the connection is broken when `Builder.always_check == true`. We exit with at most 3 retries.
-    fn get_conn(&self, mut retry: u8) -> ManagerFuture<Result<PoolRef<'_, M>, M::Error>> {
-        Box::pin(async move {
-            let shared_pool = &self.0;
-
-            let fut = shared_pool.pool_lock.lock(shared_pool);
-            let timeout = shared_pool.builder.wait_timeout;
-
-            let mut pool_ref = shared_pool.manager.timeout(fut, timeout).await?;
-
-            if shared_pool.builder.always_check {
-                let result = shared_pool.check_conn(&mut *pool_ref).await;
-
-                match result {
-                    Ok(result) => {
-                        if let Err(e) = result {
-                            pool_ref.take_drop();
-                            return if retry == 3 {
-                                Err(e)
-                            } else {
-                                retry += 1;
-                                self.get_conn(retry).await
-                            };
-                        }
-                    }
-                    Err(timeout) => {
-                        pool_ref.take_drop();
-                        return Err(timeout);
-                    }
-                }
-            };
-
-            Ok(pool_ref)
-        })
     }
 
     /// expose `Manager` to public
@@ -308,13 +306,21 @@ impl<M: Manager + Send> Deref for PoolRef<'_, M> {
     type Target = M::Connection;
 
     fn deref(&self) -> &Self::Target {
-        &self.conn.as_ref().unwrap().conn
+        &self
+            .conn
+            .as_ref()
+            .expect("Connection has already been taken")
+            .conn
     }
 }
 
 impl<M: Manager + Send> DerefMut for PoolRef<'_, M> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.conn.as_mut().unwrap().conn
+        &mut self
+            .conn
+            .as_mut()
+            .expect("Connection has already been taken")
+            .conn
     }
 }
 
@@ -334,7 +340,8 @@ impl<M: Manager + Send> PoolRef<'_, M> {
     }
 
     /// manually push a connection to pool. We treat this connection as a new born one.
-    /// operation will fail if the pool is already in full capacity(no error will return)
+    ///
+    /// operation will fail if the pool is already in full capacity(no error will return and this connection will be dropped silently)
     pub fn push_conn(&mut self, conn: M::Connection) {
         self.conn = Some(Conn {
             conn,
@@ -358,8 +365,8 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
             }
         };
 
-        let broken = self.shared_pool.manager.is_closed(&mut conn.conn);
-        if broken {
+        let is_closed = self.shared_pool.manager.is_closed(&mut conn.conn);
+        if is_closed {
             spawn_drop(self.shared_pool);
         } else {
             self.shared_pool.pool_lock.put_back(conn.into());

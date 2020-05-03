@@ -30,8 +30,7 @@ impl Pending {
     }
 }
 
-// PoolInner holds all the IdleConn and the waiters waiting for a connection.
-/// PoolInner is basically a reimplementation of `async_std::sync::Mutex`.
+// PoolInner holds all the IdleConn and the waiters(a FIFO linked list) waiting for a connection.
 pub(crate) struct PoolInner<M: Manager> {
     spawned: u8,
     pending: VecDeque<Pending>,
@@ -95,21 +94,20 @@ impl<M: Manager> PoolLock<M> {
 
     // add pending directly to pool inner if we try to spawn new connections.
     // and return the new pending count as option to notify the Pool to replenish connections
-    // we use closure here as it's not need to try spawn new connections every time we decr spawn count
-    // (like decr spawn count when a connection doesn't return to pool successfully)
-    pub(crate) fn decr_spawned<F>(&self, try_spawn: F) -> Option<u8>
-    where
-        F: FnOnce(u8) -> Option<u8>,
-    {
+    pub(crate) fn decr_spawned(&self, min_idle: u8) -> Option<u8> {
         self.inner
             .lock()
             .map(|mut inner| {
                 inner.decr_spawned_inner();
 
-                try_spawn(inner.total()).map(|pending_new| {
+                let total = inner.total();
+                if total < min_idle {
+                    let pending_new = min_idle - total;
                     inner.incr_pending_inner(pending_new);
-                    pending_new
-                })
+                    Some(pending_new)
+                } else {
+                    None
+                }
             })
             .unwrap()
     }
@@ -273,18 +271,18 @@ impl<'re, M: Manager> Future for PoolLockFuture<'re, M> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut inner = self.pool_lock.inner.lock().unwrap();
 
-        // poll a connection and use the result to mutate PoolLockFuture state as well as PoolInner state.
+        // poll a PoolRef and use the result to mutate PoolLockFuture state as well as PoolInner state.
         let poll = self.poll_pool_ref(&mut inner);
 
         // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
         match self.wait_key {
             Some(wait_key) => {
                 if poll.is_ready() {
-                    // we got poll ready therefore remove self wait_key
+                    // we got poll ready therefore remove self wait_key and entry in waiters
                     unsafe { inner.waiters.remove(wait_key) };
                     self.wait_key = None;
                 } else {
-                    // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
+                    // if we can't get a PoolRef then we spawn a new connection if we have not hit the max pool size.
                     self.spawn_idle_conn(&mut inner);
 
                     // if we are woken and have no key in waiters then we should not be in queue anymore.
@@ -297,7 +295,7 @@ impl<'re, M: Manager> Future for PoolLockFuture<'re, M> {
             }
             None => {
                 if poll.is_pending() {
-                    // if we can't get a connection then we spawn new ones if we have not hit the max pool size.
+                    // if we can't get a PoolRef then we spawn a new connection if we have not hit the max pool size.
                     self.spawn_idle_conn(&mut inner);
 
                     let waker = cx.waker().clone();

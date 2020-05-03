@@ -65,16 +65,19 @@ impl WakerList {
         if self.head == node {
             self.head = next;
         } else {
-            std::mem::replace(&mut (*prev).next_in_queue, next);
+            // std::mem::replace(&mut (*prev).next_in_queue, next);
+            (*prev).next_in_queue = next;
         }
 
         // Special treatment on removing last node
         if next.is_null() {
             if !self.head.is_null() {
-                std::mem::replace(&mut (*self.head).prev_in_queue, prev);
+                (*self.head).prev_in_queue = prev;
+                // std::mem::replace(&mut (*self.head).prev_in_queue, prev);
             }
         } else {
-            std::mem::replace(&mut (*next).prev_in_queue, prev);
+            // std::mem::replace(&mut (*next).prev_in_queue, prev);
+            (*next).prev_in_queue = prev;
         }
 
         Box::from_raw(node).waker

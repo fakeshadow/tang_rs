@@ -101,7 +101,7 @@ async fn limit() {
     let mgr = TestPoolManager(AtomicUsize::new(0));
 
     let pool = Builder::new()
-        .always_check(false)
+        .always_check(true)
         .idle_timeout(None)
         .max_lifetime(None)
         .min_idle(10)
@@ -116,26 +116,28 @@ async fn limit() {
     assert_eq!(10, state.connections);
     assert_eq!(10, state.idle_connections);
 
-    let (tx, rx) = async_std::sync::channel(1000);
-    for i in 0..1000 {
-        let pool = pool.clone();
-        let tx = tx.clone();
-        task::spawn(async move {
-            let _conn = pool.get().await.unwrap();
-            let _ = tx.send(i).await;
-            async_std::task::sleep(Duration::from_millis(1)).await;
-        });
+    let mut conns = Vec::new();
+
+    for _i in 0..24 {
+        let conn = pool.get().await.unwrap();
+        conns.push(conn);
     }
 
-    drop(tx);
+    let state = pool.state();
 
-    while let Some(_index) = rx.recv().await {}
+    assert_eq!(24, conns.len());
+
+    assert_eq!(0, state.pending_connections.len());
+    assert_eq!(24, state.connections);
+    assert_eq!(0, state.idle_connections);
+
+    drop(conns);
 
     let state = pool.state();
 
     assert_eq!(0, state.pending_connections.len());
-    assert_eq!(24, state.connections);
-    assert_eq!(24, state.idle_connections);
+    assert_eq!(12, state.connections);
+    assert_eq!(12, state.idle_connections);
 }
 
 #[async_std::test]
