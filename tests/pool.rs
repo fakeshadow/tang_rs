@@ -97,7 +97,7 @@ impl Manager for TestPoolManager {
 }
 
 #[async_std::test]
-async fn test_init_limit() {
+async fn limit() {
     let mgr = TestPoolManager(AtomicUsize::new(0));
 
     let pool = Builder::new()
@@ -115,10 +115,31 @@ async fn test_init_limit() {
     assert_eq!(0, state.pending_connections.len());
     assert_eq!(10, state.connections);
     assert_eq!(10, state.idle_connections);
+
+    let (tx, rx) = async_std::sync::channel(1000);
+    for i in 0..1000 {
+        let pool = pool.clone();
+        let tx = tx.clone();
+        task::spawn(async move {
+            let _conn = pool.get().await.unwrap();
+            let _ = tx.send(i).await;
+            async_std::task::sleep(Duration::from_millis(1)).await;
+        });
+    }
+
+    drop(tx);
+
+    while let Some(_index) = rx.recv().await {}
+
+    let state = pool.state();
+
+    assert_eq!(0, state.pending_connections.len());
+    assert_eq!(24, state.connections);
+    assert_eq!(24, state.idle_connections);
 }
 
 #[async_std::test]
-async fn test_valid_closed() {
+async fn valid_closed() {
     let mgr = TestPoolManager(AtomicUsize::new(0));
 
     let pool = Builder::new()
@@ -248,7 +269,7 @@ async fn retry_limit() {
 }
 
 #[async_std::test]
-async fn idle_test() {
+async fn idle_timeout() {
     let mgr = TestPoolManager(AtomicUsize::new(0));
 
     let pool = Builder::new()
@@ -286,7 +307,7 @@ async fn idle_test() {
 }
 
 #[async_std::test]
-async fn max_life_test() {
+async fn max_lifetime() {
     let mgr = TestPoolManager(AtomicUsize::new(0));
 
     let pool = Builder::new()
