@@ -87,14 +87,19 @@ use async_std::{
     stream::interval,
     task,
 };
+#[cfg(feature = "with-async-std")]
+use async_postgres::Socket;
 use futures_util::{future::join_all, TryFutureExt};
 use tang_rs::{Manager, ManagerFuture, WeakSharedManagedPool};
 #[cfg(feature = "with-tokio")]
 use tokio::time::{interval, timeout, Elapsed as TimeoutError};
+#[cfg(feature = "with-tokio")]
+use tokio_postgres::Socket;
+
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
     types::Type,
-    Client, Config, Error, Socket, Statement,
+    Client, Config, Error, Statement,
 };
 
 pub struct PostgresManager<Tls>
@@ -172,7 +177,7 @@ macro_rules! impl_manager {
 
                     // ToDo: fix this error convertion.
                     #[cfg(feature = "with-async-std")]
-                    let (c, conn) = async_postgres::connect(self.config.clone())
+                    let (c, conn) = async_postgres::connect_tls(self.config.clone(), self.tls.clone())
                         .await
                         .map_err(|_| PostgresPoolError::TimeOut)?;
 
