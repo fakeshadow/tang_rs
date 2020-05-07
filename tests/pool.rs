@@ -6,98 +6,106 @@ use std::time::Duration;
 use async_std::{prelude::*, stream::interval, task};
 use tang_rs::{Builder, Manager, ManagerFuture, PoolRef, WeakSharedManagedPool};
 
-struct TestPoolManager(AtomicUsize);
+macro_rules! test_pool {
+    ($valid_condition: expr, $broken_condition: expr) => {
+        struct TestPoolManager(AtomicUsize);
 
-struct TestPoolError;
+        struct TestPoolError;
 
-impl Debug for TestPoolError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.debug_struct("TestPoolError")
-            .field("source", &"Unknown")
-            .finish()
-    }
-}
-
-impl Manager for TestPoolManager {
-    type Connection = usize;
-    type Error = TestPoolError;
-    type TimeoutError = TestPoolError;
-
-    fn connect(&self) -> ManagerFuture<'_, Result<Self::Connection, Self::Error>> {
-        Box::pin(async move { Ok(self.0.fetch_add(1, Ordering::SeqCst)) })
-    }
-
-    fn is_valid<'a>(
-        &self,
-        conn: &'a mut Self::Connection,
-    ) -> ManagerFuture<'a, Result<(), Self::Error>> {
-        Box::pin(async move {
-            if *conn % 2 == 0 {
-                Ok(())
-            } else {
-                Err(TestPoolError)
+        impl Debug for TestPoolError {
+            fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+                f.debug_struct("TestPoolError")
+                    .field("source", &"Unknown")
+                    .finish()
             }
-        })
-    }
-
-    fn is_closed(&self, conn: &mut Self::Connection) -> bool {
-        if *conn % 4 == 0 {
-            true
-        } else {
-            false
         }
-    }
 
-    fn spawn<Fut>(&self, fut: Fut)
-    where
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        task::spawn(fut);
-    }
+        impl Manager for TestPoolManager {
+            type Connection = usize;
+            type Error = TestPoolError;
+            type TimeoutError = TestPoolError;
 
-    fn schedule_inner(shared_pool: WeakSharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
-        let rate = shared_pool
-            .upgrade()
-            .expect("Pool is gone before we start schedule work")
-            .get_builder()
-            .get_reaper_rate();
-        let mut interval = interval(rate);
-        Box::pin(async move {
-            loop {
-                let _i = interval.next().await;
-                match shared_pool.upgrade() {
-                    Some(shared_pool) => {
-                        let _ = shared_pool.reap_idle_conn().await;
+            fn connect(&self) -> ManagerFuture<'_, Result<Self::Connection, Self::Error>> {
+                Box::pin(async move { Ok(self.0.fetch_add(1, Ordering::SeqCst)) })
+            }
+
+            fn is_valid<'a>(
+                &self,
+                conn: &'a mut Self::Connection,
+            ) -> ManagerFuture<'a, Result<(), Self::Error>> {
+                Box::pin(async move {
+                    if *conn % $valid_condition == 0 {
+                        Ok(())
+                    } else {
+                        Err(TestPoolError)
                     }
-                    None => break,
-                }
+                })
             }
-        })
-    }
 
-    fn garbage_collect_inner(
-        shared_pool: WeakSharedManagedPool<Self>,
-    ) -> ManagerFuture<'static, ()> {
-        let rate = shared_pool
-            .upgrade()
-            .expect("Pool is gone before we start garbage collection")
-            .get_builder()
-            .get_reaper_rate();
-        let mut interval = interval(rate * 6);
-        Box::pin(async move {
-            loop {
-                let _i = interval.next().await;
-                match shared_pool.upgrade() {
-                    Some(shared_pool) => shared_pool.garbage_collect(),
-                    None => break,
+            fn is_closed(&self, conn: &mut Self::Connection) -> bool {
+                if *conn % $broken_condition == 0 {
+                    true
+                } else {
+                    false
                 }
             }
-        })
-    }
+
+            fn spawn<Fut>(&self, fut: Fut)
+            where
+                Fut: Future<Output = ()> + Send + 'static,
+            {
+                task::spawn(fut);
+            }
+
+            fn schedule_inner(
+                shared_pool: WeakSharedManagedPool<Self>,
+            ) -> ManagerFuture<'static, ()> {
+                let rate = shared_pool
+                    .upgrade()
+                    .expect("Pool is gone before we start schedule work")
+                    .get_builder()
+                    .get_reaper_rate();
+                let mut interval = interval(rate);
+                Box::pin(async move {
+                    loop {
+                        let _i = interval.next().await;
+                        match shared_pool.upgrade() {
+                            Some(shared_pool) => {
+                                let _ = shared_pool.reap_idle_conn().await;
+                            }
+                            None => break,
+                        }
+                    }
+                })
+            }
+
+            fn garbage_collect_inner(
+                shared_pool: WeakSharedManagedPool<Self>,
+            ) -> ManagerFuture<'static, ()> {
+                let rate = shared_pool
+                    .upgrade()
+                    .expect("Pool is gone before we start garbage collection")
+                    .get_builder()
+                    .get_reaper_rate();
+                let mut interval = interval(rate * 6);
+                Box::pin(async move {
+                    loop {
+                        let _i = interval.next().await;
+                        match shared_pool.upgrade() {
+                            Some(shared_pool) => shared_pool.garbage_collect(),
+                            None => break,
+                        }
+                    }
+                })
+            }
+        }
+    };
 }
 
 #[async_std::test]
 async fn limit() {
+    test_pool!(2, 4);
+
     let mgr = TestPoolManager(AtomicUsize::new(0));
 
     let pool = Builder::new()
@@ -142,6 +150,8 @@ async fn limit() {
 
 #[async_std::test]
 async fn valid_closed() {
+    test_pool!(2, 4);
+
     let mgr = TestPoolManager(AtomicUsize::new(0));
 
     let pool = Builder::new()
@@ -188,43 +198,9 @@ async fn valid_closed() {
 
 #[async_std::test]
 async fn retry_limit() {
-    struct TestPoolManagerRetry(AtomicUsize);
+    test_pool!(5, 1);
 
-    impl Manager for TestPoolManagerRetry {
-        type Connection = usize;
-        type Error = TestPoolError;
-        type TimeoutError = TestPoolError;
-
-        fn connect(&self) -> ManagerFuture<'_, Result<Self::Connection, Self::Error>> {
-            Box::pin(async move { Ok(self.0.fetch_add(1, Ordering::SeqCst)) })
-        }
-
-        fn is_valid<'a>(
-            &self,
-            conn: &'a mut Self::Connection,
-        ) -> ManagerFuture<'a, Result<(), Self::Error>> {
-            Box::pin(async move {
-                if *conn % 5 == 0 {
-                    Ok(())
-                } else {
-                    Err(TestPoolError)
-                }
-            })
-        }
-
-        fn is_closed(&self, _conn: &mut Self::Connection) -> bool {
-            false
-        }
-
-        fn spawn<Fut>(&self, fut: Fut)
-        where
-            Fut: Future<Output = ()> + Send + 'static,
-        {
-            task::spawn(fut);
-        }
-    }
-
-    let mgr = TestPoolManagerRetry(AtomicUsize::new(0));
+    let mgr = TestPoolManager(AtomicUsize::new(0));
 
     let pool = Builder::new()
         .always_check(true)
@@ -238,7 +214,7 @@ async fn retry_limit() {
 
     let mut errs = 0;
 
-    let f = |errs: &mut i32, result: Result<PoolRef<'_, TestPoolManagerRetry>, TestPoolError>| {
+    let f = |errs: &mut i32, result: Result<PoolRef<'_, TestPoolManager>, TestPoolError>| {
         if result.is_ok() {
             let conn = *(result.unwrap());
             assert_eq!(true, conn == 0 || conn == 5);
@@ -272,6 +248,8 @@ async fn retry_limit() {
 
 #[async_std::test]
 async fn idle_timeout() {
+    test_pool!(2, 4);
+
     let mgr = TestPoolManager(AtomicUsize::new(0));
 
     let pool = Builder::new()
@@ -310,6 +288,8 @@ async fn idle_timeout() {
 
 #[async_std::test]
 async fn max_lifetime() {
+    test_pool!(2, 4);
+
     let mgr = TestPoolManager(AtomicUsize::new(0));
 
     let pool = Builder::new()

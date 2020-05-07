@@ -106,11 +106,12 @@ async fn main() {
         .await
         .expect("fail to build pool");
 
-    let (tx, rx) = async_std::sync::channel(1000000);
+    let count = 1_000_000;
+    let (tx, rx) = async_std::sync::channel(count);
 
-    // spawn 24 futures and pull connections from pool at the same time.
+    // spawn 1_000_000 futures and pull connections from pool at the same time.
     let now = std::time::Instant::now();
-    for _i in 0..1000000 {
+    for _i in 0..count {
         let pool = pool.clone();
         let tx = tx.clone();
         task::spawn(async move {

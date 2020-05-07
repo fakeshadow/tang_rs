@@ -137,6 +137,7 @@ impl Builder {
     }
 
     /// Consumes the `Builder`, returning a new uninitialized `Pool`.
+    ///
     /// (`Pool` have no connection and scheduled tasks like connection reaper and garbage collect)
     pub fn build_uninitialized<M: Manager>(self, manager: M) -> Result<Pool<M>, M::Error> {
         assert!(

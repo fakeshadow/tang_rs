@@ -71,16 +71,15 @@ impl<M: Manager + Send> ManagedPool<M> {
                 let result = self.check_conn(&mut *pool_ref).await;
 
                 match result {
-                    Ok(result) => {
-                        if let Err(e) = result {
-                            pool_ref.take_drop();
-                            return if retry == 3 {
-                                Err(e)
-                            } else {
-                                retry += 1;
-                                self.get_conn(shared_pool, retry).await
-                            };
-                        }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        pool_ref.take_drop();
+                        return if retry == 3 {
+                            Err(e)
+                        } else {
+                            retry += 1;
+                            self.get_conn(shared_pool, retry).await
+                        };
                     }
                     Err(timeout) => {
                         pool_ref.take_drop();
@@ -88,6 +87,7 @@ impl<M: Manager + Send> ManagedPool<M> {
                     }
                 }
             };
+
             Ok(pool_ref)
         })
     }
@@ -148,8 +148,8 @@ impl<M: Manager + Send> ManagedPool<M> {
 
     // ToDo: we should figure a way to handle failed spawn.
     pub(crate) fn spawn<Fut>(&self, fut: Fut)
-    where
-        Fut: Future<Output = ()> + Send + 'static,
+        where
+            Fut: Future<Output=()> + Send + 'static,
     {
         self.manager.spawn(fut);
     }
@@ -267,10 +267,10 @@ impl<M: Manager + Send> Pool<M> {
 
     /// Run the pool with a closure.
     pub async fn run<T, E, F>(&self, f: F) -> Result<T, E>
-    where
-        F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + '_>>,
-        E: From<M::Error>,
-        T: Send + 'static,
+        where
+            F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output=Result<T, E>> + Send + '_>>,
+            E: From<M::Error>,
+            T: Send + 'static,
     {
         let shared_pool = &self.0;
         let mut pool_ref = shared_pool.get_conn(shared_pool, 0).await?;
