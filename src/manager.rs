@@ -85,6 +85,9 @@ pub trait Manager: Sized + Send + Sync + 'static {
         self.garbage_collect(shared_pool);
     }
 
+    /// This method will be called when `Pool<Manager>` is dropping
+    fn on_stop(&self) {}
+
     // schedule reaping runs in a spawned future.
     fn schedule_reaping(&self, shared_pool: &SharedManagedPool<Self>) {
         let builder = shared_pool.get_builder();

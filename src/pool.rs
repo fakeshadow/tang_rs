@@ -148,8 +148,8 @@ impl<M: Manager + Send> ManagedPool<M> {
 
     // ToDo: we should figure a way to handle failed spawn.
     pub(crate) fn spawn<Fut>(&self, fut: Fut)
-        where
-            Fut: Future<Output=()> + Send + 'static,
+    where
+        Fut: Future<Output = ()> + Send + 'static,
     {
         self.manager.spawn(fut);
     }
@@ -201,6 +201,12 @@ impl<M: Manager + Send> Clone for Pool<M> {
 impl<M: Manager + Send> fmt::Debug for Pool<M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_fmt(format_args!("Pool({:p})", self.0))
+    }
+}
+
+impl<M: Manager + Send> Drop for Pool<M> {
+    fn drop(&mut self) {
+        self.0.manager.on_stop();
     }
 }
 
@@ -267,10 +273,10 @@ impl<M: Manager + Send> Pool<M> {
 
     /// Run the pool with a closure.
     pub async fn run<T, E, F>(&self, f: F) -> Result<T, E>
-        where
-            F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output=Result<T, E>> + Send + '_>>,
-            E: From<M::Error>,
-            T: Send + 'static,
+    where
+        F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + '_>>,
+        E: From<M::Error>,
+        T: Send + 'static,
     {
         let shared_pool = &self.0;
         let mut pool_ref = shared_pool.get_conn(shared_pool, 0).await?;
