@@ -4,13 +4,18 @@
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_std::{
     future::{timeout, TimeoutError},
+    prelude::StreamExt,
+    stream::{interval, Interval},
     task,
 };
-use std::time::Duration;
-use tang_rs::{Builder, Manager, ManagerFuture, WeakSharedManagedPool};
+use tang_rs::{
+    Builder, GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping,
+    SharedManagedPool,
+};
 
 // our test pool would just generate usize from 0 as connections.
 struct TestPoolManager(AtomicUsize);
@@ -36,6 +41,28 @@ impl Debug for TestPoolError {
 impl From<TimeoutError> for TestPoolError {
     fn from(_e: TimeoutError) -> Self {
         TestPoolError
+    }
+}
+
+// We can impl some default pool behavior as trait to our TestPool like garbage collect and schedule recycle connections
+impl GarbageCollect for TestPoolManager {}
+
+impl ScheduleReaping for TestPoolManager {}
+
+// If we impl certain behaviors we have to impl this boilerplate too.
+// because different runtime use different interval :(
+impl ManagerInterval for TestPoolManager {
+    // the interval type runtime returns when constructed
+    type Interval = Interval;
+    // the interval tick return type
+    type Tick = Option<()>;
+
+    fn interval(dur: Duration) -> Self::Interval {
+        interval(dur)
+    }
+
+    fn tick(tick: &mut Self::Interval) -> ManagerFuture<'_, Self::Tick> {
+        Box::pin(tick.next())
     }
 }
 
@@ -84,11 +111,10 @@ impl Manager for TestPoolManager {
         Box::pin(timeout(dur, fut))
     }
 
-    // override the schedule_inner method to run schedule task to go over all the connections.
-    fn schedule_inner(_shared_pool: WeakSharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
-        Box::pin(async move {
-            // do something
-        })
+    // We have to attach the behaviors(GarbageCollect and ScheduleReaping traits) to this hook so that they can start with pool.
+    fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
+        self.schedule_reaping(shared_pool);
+        self.garbage_collect(shared_pool);
     }
 }
 

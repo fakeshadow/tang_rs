@@ -113,8 +113,8 @@
 //!```
 
 pub use builder::Builder;
-pub use manager::{Manager, ManagerFuture};
-pub use pool::{Pool, PoolRef, WeakSharedManagedPool};
+pub use manager::{GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping};
+pub use pool::{Pool, PoolRef, SharedManagedPool};
 
 mod builder;
 mod manager;

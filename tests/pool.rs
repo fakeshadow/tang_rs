@@ -3,8 +3,15 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use async_std::{prelude::*, stream::interval, task};
-use tang_rs::{Builder, Manager, ManagerFuture, PoolRef, WeakSharedManagedPool};
+use async_std::{
+    prelude::*,
+    stream::{interval, Interval},
+    task,
+};
+use tang_rs::{
+    Builder, GarbageCollect, Manager, ManagerFuture, ManagerInterval, PoolRef, ScheduleReaping,
+    SharedManagedPool,
+};
 
 macro_rules! test_pool {
     ($valid_condition: expr, $broken_condition: expr) => {
@@ -19,6 +26,23 @@ macro_rules! test_pool {
                     .finish()
             }
         }
+
+        impl ManagerInterval for TestPoolManager {
+            type Interval = Interval;
+            type Tick = Option<()>;
+
+            fn interval(dur: Duration) -> Self::Interval {
+                interval(dur)
+            }
+
+            fn tick(tick: &mut Self::Interval) -> ManagerFuture<'_, Self::Tick> {
+                Box::pin(tick.next())
+            }
+        }
+
+        impl GarbageCollect for TestPoolManager {}
+
+        impl ScheduleReaping for TestPoolManager {}
 
         impl Manager for TestPoolManager {
             type Connection = usize;
@@ -57,46 +81,9 @@ macro_rules! test_pool {
                 task::spawn(fut);
             }
 
-            fn schedule_inner(
-                shared_pool: WeakSharedManagedPool<Self>,
-            ) -> ManagerFuture<'static, ()> {
-                let rate = shared_pool
-                    .upgrade()
-                    .expect("Pool is gone before we start schedule work")
-                    .get_builder()
-                    .get_reaper_rate();
-                let mut interval = interval(rate);
-                Box::pin(async move {
-                    loop {
-                        let _i = interval.next().await;
-                        match shared_pool.upgrade() {
-                            Some(shared_pool) => {
-                                let _ = shared_pool.reap_idle_conn().await;
-                            }
-                            None => break,
-                        }
-                    }
-                })
-            }
-
-            fn garbage_collect_inner(
-                shared_pool: WeakSharedManagedPool<Self>,
-            ) -> ManagerFuture<'static, ()> {
-                let rate = shared_pool
-                    .upgrade()
-                    .expect("Pool is gone before we start garbage collection")
-                    .get_builder()
-                    .get_reaper_rate();
-                let mut interval = interval(rate * 6);
-                Box::pin(async move {
-                    loop {
-                        let _i = interval.next().await;
-                        match shared_pool.upgrade() {
-                            Some(shared_pool) => shared_pool.garbage_collect(),
-                            None => break,
-                        }
-                    }
-                })
+            fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
+                self.schedule_reaping(shared_pool);
+                self.garbage_collect(shared_pool);
             }
         }
     };
@@ -316,7 +303,7 @@ async fn max_lifetime() {
     assert_eq!(4, state.connections);
     assert_eq!(0, state.pending_connections.len());
 
-    let mut interval = async_std::stream::interval(Duration::from_secs(6));
+    let mut interval = interval(Duration::from_secs(6));
 
     interval.next().await;
 

@@ -8,13 +8,17 @@ use std::time::Duration;
 use async_std::{
     future::{timeout, TimeoutError},
     prelude::StreamExt,
-    stream::interval,
+    stream::{interval, Interval},
     task,
 };
 use redis::{aio::MultiplexedConnection, Client, IntoConnectionInfo, RedisError};
-use tang_rs::{Manager, ManagerFuture, WeakSharedManagedPool};
+use tang_rs::{
+    GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping, SharedManagedPool,
+};
 #[cfg(feature = "with-tokio")]
-use tokio::time::{interval, timeout, Elapsed as TimeoutError};
+use tokio::time::{
+    timeout, Elapsed as TimeoutError, {interval, Instant, Interval},
+};
 
 #[derive(Clone)]
 pub struct RedisManager {
@@ -29,6 +33,33 @@ impl RedisManager {
         }
     }
 }
+
+macro_rules! impl_manager_interval {
+    ($interval_type: ty, $tick_type: ty, $tick_method: ident) => {
+        impl ManagerInterval for RedisManager {
+            type Interval = $interval_type;
+            type Tick = $tick_type;
+
+            fn interval(dur: Duration) -> Self::Interval {
+                interval(dur)
+            }
+
+            fn tick(tick: &mut Self::Interval) -> ManagerFuture<'_, Self::Tick> {
+                Box::pin(tick.$tick_method())
+            }
+        }
+    };
+}
+
+#[cfg(feature = "with-tokio")]
+impl_manager_interval!(Interval, Instant, tick);
+
+#[cfg(feature = "with-async-std")]
+impl_manager_interval!(Interval, Option<()>, next);
+
+impl ScheduleReaping for RedisManager {}
+
+impl GarbageCollect for RedisManager {}
 
 macro_rules! impl_manager {
     ($connection: ty, $get_connection: ident, $spawn: path, $timeout: ident, $interval_tick: ident) => {
@@ -76,46 +107,9 @@ macro_rules! impl_manager {
                 Box::pin($timeout(dur, fut))
             }
 
-            fn schedule_inner(
-                shared_pool: WeakSharedManagedPool<Self>,
-            ) -> ManagerFuture<'static, ()> {
-                let rate = shared_pool
-                    .upgrade()
-                    .expect("Pool is gone before we start schedule work")
-                    .get_builder()
-                    .get_reaper_rate();
-                let mut interval = interval(rate);
-                Box::pin(async move {
-                    loop {
-                        let _i = interval.$interval_tick().await;
-                        match shared_pool.upgrade() {
-                            Some(shared_pool) => {
-                                let _ = shared_pool.reap_idle_conn().await;
-                            }
-                            None => break,
-                        }
-                    }
-                })
-            }
-
-            fn garbage_collect_inner(
-                shared_pool: WeakSharedManagedPool<Self>,
-            ) -> ManagerFuture<'static, ()> {
-                let rate = shared_pool
-                    .upgrade()
-                    .expect("Pool is gone before we start garbage collection")
-                    .get_builder()
-                    .get_reaper_rate();
-                let mut interval = interval(rate * 6);
-                Box::pin(async move {
-                    loop {
-                        let _i = interval.$interval_tick().await;
-                        match shared_pool.upgrade() {
-                            Some(shared_pool) => shared_pool.garbage_collect(),
-                            None => break,
-                        }
-                    }
-                })
+            fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
+                self.schedule_reaping(shared_pool);
+                self.garbage_collect(shared_pool);
             }
         }
     };

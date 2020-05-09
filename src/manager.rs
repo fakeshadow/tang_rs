@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::pool::{SharedManagedPool, WeakSharedManagedPool};
+use crate::pool::SharedManagedPool;
 
 pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -57,52 +57,66 @@ pub trait Manager: Sized + Send + Sync + 'static {
         })
     }
 
-    /// Override this method if you actually want to handle a schedule task.
-    ///
-    /// The schedule interval is determined by `Builder.reaper_rate`
-    ///
-    /// *. Only called when `Builder.max_lifetime.is_some() || Builder.idle_timeout.is_some()`
-    fn schedule_inner(_shared_pool: WeakSharedManagedPool<Self>) -> ManagerFuture<'static, ()> {
-        Box::pin(async {})
-    }
-
-    /// Override this method if you actually want to do some garbage collection.
-    ///
-    /// The garbage collect interval is determined by `Builder.reaper_rate * 6`
-    ///
-    /// *. Only called when `Builder.use_gc == true`
-    fn garbage_collect_inner(
-        _shared_pool: WeakSharedManagedPool<Self>,
-    ) -> ManagerFuture<'static, ()> {
-        Box::pin(async {})
-    }
-
-    /// Default jobs to do when the pool start.
-    ///
-    /// By overriding it you can take control what will be run when the pool starts.
-    fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
-        self.schedule_reaping(shared_pool);
-        self.garbage_collect(shared_pool);
-    }
+    /// This method will be called when `Pool<Manager>::init()` executes.
+    fn on_start(&self, _shared_pool: &SharedManagedPool<Self>) {}
 
     /// This method will be called when `Pool<Manager>` is dropping
     fn on_stop(&self) {}
+}
 
+/// helper trait to spawn default garbage collect process to `Pool<Manager>`.
+pub trait GarbageCollect: Manager + ManagerInterval {
+    fn garbage_collect(&self, shared_pool: &SharedManagedPool<Self>) {
+        let builder = shared_pool.get_builder();
+        if builder.use_gc {
+            let rate = builder.get_reaper_rate();
+            let shared_pool = Arc::downgrade(shared_pool);
+
+            let mut interval = Self::interval(rate * 6);
+            self.spawn(async move {
+                loop {
+                    let _i = Self::tick(&mut interval).await;
+                    match shared_pool.upgrade() {
+                        Some(shared_pool) => shared_pool.garbage_collect(),
+                        None => break,
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// helper trait to spawn default schedule reaping process to `Pool<Manager>`.
+pub trait ScheduleReaping: Manager + ManagerInterval {
     // schedule reaping runs in a spawned future.
     fn schedule_reaping(&self, shared_pool: &SharedManagedPool<Self>) {
         let builder = shared_pool.get_builder();
         if builder.max_lifetime.is_some() || builder.idle_timeout.is_some() {
-            let fut = Self::schedule_inner(Arc::downgrade(shared_pool));
-            self.spawn(fut);
-        }
-    }
+            let rate = builder.get_reaper_rate();
+            let shared_pool = Arc::downgrade(shared_pool);
 
-    // schedule garbage collection runs in a spawned future.
-    fn garbage_collect(&self, shared_pool: &SharedManagedPool<Self>) {
-        let builder = shared_pool.get_builder();
-        if builder.use_gc {
-            let fut = Self::garbage_collect_inner(Arc::downgrade(shared_pool));
-            self.spawn(fut);
+            let mut interval = Self::interval(rate);
+            self.spawn(async move {
+                loop {
+                    let _i = Self::tick(&mut interval).await;
+                    match shared_pool.upgrade() {
+                        Some(shared_pool) => {
+                            let _ = shared_pool.reap_idle_conn().await;
+                        }
+                        None => break,
+                    }
+                }
+            });
         }
     }
+}
+
+/// helper trait as we have different interval tick api in different runtime
+pub trait ManagerInterval {
+    type Interval: Send;
+    type Tick: Send;
+
+    fn interval(dur: Duration) -> Self::Interval;
+
+    fn tick(tick: &mut Self::Interval) -> ManagerFuture<'_, Self::Tick>;
 }

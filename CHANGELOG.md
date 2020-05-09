@@ -1,3 +1,13 @@
+(May 9, 2020)
+----------------------
+### Breaking
+- `Manager` trait: Remove `schedule_inner` and `garbage_collect_innner`. `on_start` do nothing by default.
+- This make the trait more simple to impl for non scheduled cases.
+### Add
+- `Manager::on_stop` method which will be called when `Pool<Manager>` is dropping.
+- `ScheduleReaping`, `GarbageCollect` and `ManagerInterval` trait for scheduled work.(See basic_example for usage)
+
+
 (April 28, 2020)
 ----------------------
 ### Breaking

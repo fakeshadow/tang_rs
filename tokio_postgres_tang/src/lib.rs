@@ -81,7 +81,9 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use futures_util::{future::join_all, TryFutureExt};
-use tang_rs::{Manager, ManagerFuture, WeakSharedManagedPool};
+use tang_rs::{
+    GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping, SharedManagedPool,
+};
 use tokio_postgres::Client;
 #[cfg(feature = "with-async-std")]
 use {
@@ -93,13 +95,13 @@ use {
     async_std::{
         future::{timeout, TimeoutError},
         prelude::StreamExt,
-        stream::interval,
+        stream::{interval, Interval},
         task,
     },
 };
 #[cfg(feature = "with-tokio")]
 use {
-    tokio::time::{interval, timeout, Elapsed as TimeoutError},
+    tokio::time::{interval, timeout, Elapsed as TimeoutError, Instant, Interval},
     tokio_postgres::{
         tls::{MakeTlsConnect, TlsConnect},
         types::Type,
@@ -162,8 +164,55 @@ where
     }
 }
 
+macro_rules! impl_manager_interval {
+    ($interval_type: ty, $tick_type: ty, $tick_method: ident) => {
+        impl<Tls> ManagerInterval for PostgresManager<Tls>
+        where
+            Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
+            Tls::Stream: Send,
+            Tls::TlsConnect: Send,
+            <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
+        {
+            type Interval = $interval_type;
+            type Tick = $tick_type;
+
+            fn interval(dur: Duration) -> Self::Interval {
+                interval(dur)
+            }
+
+            fn tick(tick: &mut Self::Interval) -> ManagerFuture<'_, Self::Tick> {
+                Box::pin(tick.$tick_method())
+            }
+        }
+    };
+}
+
+#[cfg(feature = "with-tokio")]
+impl_manager_interval!(Interval, Instant, tick);
+
+#[cfg(feature = "with-async-std")]
+impl_manager_interval!(Interval, Option<()>, next);
+
+impl<Tls> ScheduleReaping for PostgresManager<Tls>
+where
+    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
+    Tls::Stream: Send,
+    Tls::TlsConnect: Send,
+    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+}
+
+impl<Tls> GarbageCollect for PostgresManager<Tls>
+where
+    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
+    Tls::Stream: Send,
+    Tls::TlsConnect: Send,
+    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+}
+
 macro_rules! impl_manager {
-    ($connection: ty, $spawn: path, $timeout: ident, $interval_tick: ident) => {
+    ($connection: ty, $spawn: path, $timeout: ident) => {
         impl<Tls> Manager for PostgresManager<Tls>
         where
             Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
@@ -246,66 +295,19 @@ macro_rules! impl_manager {
                 Box::pin($timeout(dur, fut))
             }
 
-            fn schedule_inner(
-                shared_pool: WeakSharedManagedPool<Self>,
-            ) -> ManagerFuture<'static, ()> {
-                let rate = shared_pool
-                    .upgrade()
-                    .expect("Pool is gone before we start schedule work")
-                    .get_builder()
-                    .get_reaper_rate();
-                let mut interval = interval(rate);
-                Box::pin(async move {
-                    loop {
-                        let _i = interval.$interval_tick().await;
-                        match shared_pool.upgrade() {
-                            Some(shared_pool) => {
-                                let _ = shared_pool.reap_idle_conn().await;
-                            }
-                            None => break,
-                        }
-                    }
-                })
-            }
-
-            fn garbage_collect_inner(
-                shared_pool: WeakSharedManagedPool<Self>,
-            ) -> ManagerFuture<'static, ()> {
-                let rate = shared_pool
-                    .upgrade()
-                    .expect("Pool is gone before we start garbage collection")
-                    .get_builder()
-                    .get_reaper_rate();
-                let mut interval = interval(rate * 6);
-                Box::pin(async move {
-                    loop {
-                        let _i = interval.$interval_tick().await;
-                        match shared_pool.upgrade() {
-                            Some(shared_pool) => shared_pool.garbage_collect(),
-                            None => break,
-                        }
-                    }
-                })
+            fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
+                self.schedule_reaping(shared_pool);
+                self.garbage_collect(shared_pool);
             }
         }
     };
 }
 
 #[cfg(feature = "with-tokio")]
-impl_manager!(
-    (Client, HashMap<String, Statement>),
-    tokio::spawn,
-    timeout,
-    tick
-);
+impl_manager!((Client, HashMap<String, Statement>), tokio::spawn, timeout);
 
 #[cfg(feature = "with-async-std")]
-impl_manager!(
-    (Client, HashMap<String, Statement>),
-    task::spawn,
-    timeout,
-    next
-);
+impl_manager!((Client, HashMap<String, Statement>), task::spawn, timeout);
 
 impl<Tls> fmt::Debug for PostgresManager<Tls>
 where
