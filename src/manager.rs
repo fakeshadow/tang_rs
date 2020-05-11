@@ -77,7 +77,11 @@ pub trait GarbageCollect: Manager + ManagerInterval {
                 loop {
                     let _i = Self::tick(&mut interval).await;
                     match shared_pool.upgrade() {
-                        Some(shared_pool) => shared_pool.garbage_collect(),
+                        Some(shared_pool) => {
+                            if shared_pool.is_running() {
+                                shared_pool.garbage_collect();
+                            }
+                        }
                         None => break,
                     }
                 }
@@ -101,7 +105,9 @@ pub trait ScheduleReaping: Manager + ManagerInterval {
                     let _i = Self::tick(&mut interval).await;
                     match shared_pool.upgrade() {
                         Some(shared_pool) => {
-                            let _ = shared_pool.reap_idle_conn().await;
+                            if shared_pool.is_running() {
+                                let _ = shared_pool.reap_idle_conn().await;
+                            }
                         }
                         None => break,
                     }

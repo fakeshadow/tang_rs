@@ -24,7 +24,7 @@ default-features = false
 optional = true
 
 [dependencies.redis]
-git = "https://github.com/mitsuhiko/redis-rs.git"
+version = "0.16.0"
 default-features = false
 optional = true
 

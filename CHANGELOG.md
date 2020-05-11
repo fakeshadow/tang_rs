@@ -1,3 +1,9 @@
+(May 11, 2020)
+----------------------
+### Add
+- `Pool<Manager>::pause` and `Pool<Manager>::resume` methods to pause and restart the pool.
+  
+
 (May 9, 2020)
 ----------------------
 ### Breaking
@@ -20,7 +26,7 @@
 (April 26, 2020)
 ----------------------
 ### Add
-- Expose `Manager` with `Pool::get_manager`
+- Expose `Manager` with `Pool<Manager>::get_manager`
 
 
 (April 25, 2020)
@@ -43,8 +49,8 @@
 (October 24, 2019)
 ----------------------
 ### Add
-- `Builder::build_uninitialized` for building an empty `Pool` that can be initialized manually with `Pool::init` method.
-This enable use of `Pool` with `lazy_static`.
+- `Builder::build_uninitialized` for building an empty `Pool<Manager>` that can be initialized manually with `Pool<Manager>::init` method.
+This enable use of `Pool<Manager>` with `lazy_static`.
 
 
 (October 16, 2019)
@@ -70,7 +76,7 @@ This enable use of `Pool` with `lazy_static`.
 (October 3, 2019)
 ----------------------
 ### Breaking
-- Return error type `tang_rs::PostgresPoolError` and `tang_rs::RedisPoolEror` when use `Pool.get()` 
+- Return error type `tang_rs::PostgresPoolError` and `tang_rs::RedisPoolEror` when use `Pool<Manager>.get()` 
 ### Add
 - `PoolRef.take_conn()` method to take the ownership of connection out from pool.
 - `Builder.queue_timeout(<Duration>)` method to indicate the timeout of waiting queue for pool.

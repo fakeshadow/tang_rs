@@ -1,9 +1,10 @@
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_std::{
+    future::timeout,
     prelude::*,
     stream::{interval, Interval},
     task,
@@ -310,5 +311,78 @@ async fn max_lifetime() {
     let state = pool.state();
     assert_eq!(2, state.idle_connections);
     assert_eq!(2, state.connections);
+    assert_eq!(0, state.pending_connections.len());
+}
+
+#[async_std::test]
+async fn pause() {
+    test_pool!(1, 100);
+
+    let mgr = TestPoolManager(AtomicUsize::new(0));
+
+    let pool = Builder::new()
+        .always_check(false)
+        .max_lifetime(Some(Duration::from_secs(1)))
+        .reaper_rate(Duration::from_secs(1))
+        .min_idle(8)
+        .max_size(16)
+        .build(mgr)
+        .await
+        .expect("fail to build pool");
+
+    pool.pause();
+
+    let now = Instant::now();
+    let res = timeout(Duration::from_secs(3), pool.get()).await;
+
+    assert_eq!(true, res.is_err());
+    assert_eq!(
+        true,
+        Instant::now().duration_since(now) > Duration::from_secs(3)
+    );
+
+    pool.resume();
+
+    let mut conns = Vec::new();
+    for _i in 0..8 {
+        let conn = pool.get().await.unwrap();
+        conns.push(conn);
+    }
+
+    pool.pause();
+
+    drop(conns);
+
+    let state = pool.state();
+
+    assert_eq!(0, state.connections);
+    assert_eq!(0, state.idle_connections);
+    assert_eq!(0, state.pending_connections.len());
+
+    pool.resume();
+
+    let mut conns = Vec::new();
+    for _i in 0..16 {
+        let conn = pool.get().await.unwrap();
+        conns.push(conn);
+    }
+
+    drop(conns);
+
+    pool.pause();
+
+    let state = pool.state();
+
+    assert_eq!(16, state.connections);
+    assert_eq!(16, state.idle_connections);
+    assert_eq!(0, state.pending_connections.len());
+
+    pool.resume();
+
+    task::sleep(Duration::from_secs(2)).await;
+
+    let state = pool.state();
+    assert_eq!(8, state.connections);
+    assert_eq!(8, state.idle_connections);
     assert_eq!(0, state.pending_connections.len());
 }

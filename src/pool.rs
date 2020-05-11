@@ -2,7 +2,10 @@ use std::fmt;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 
 use crate::builder::Builder;
@@ -51,6 +54,7 @@ impl<M: Manager> From<IdleConn<M>> for Conn<M> {
 pub struct ManagedPool<M: Manager + Send> {
     builder: Builder,
     manager: M,
+    running: AtomicBool,
     pool_lock: PoolLock<M>,
 }
 
@@ -92,10 +96,11 @@ impl<M: Manager + Send> ManagedPool<M> {
         })
     }
 
-    fn drop_conn(&self) -> Option<u8> {
+    fn drop_conn(&self, should_spawn_new: bool) -> Option<u8> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
-        self.pool_lock.decr_spawned(self.builder.min_idle)
+        self.pool_lock
+            .decr_spawned(self.builder.min_idle, should_spawn_new)
     }
 
     pub(crate) async fn add_idle_conn(&self) -> Result<(), M::Error> {
@@ -144,6 +149,14 @@ impl<M: Manager + Send> ManagedPool<M> {
         }
 
         Ok(())
+    }
+
+    fn if_running(&self, running: bool) {
+        self.running.store(running, Ordering::Release);
+    }
+
+    pub(crate) fn is_running(&self) -> bool {
+        self.running.load(Ordering::Acquire)
     }
 
     // ToDo: we should figure a way to handle failed spawn.
@@ -216,6 +229,7 @@ impl<M: Manager + Send> Pool<M> {
         Pool(Arc::new(ManagedPool {
             builder,
             manager,
+            running: AtomicBool::new(true),
             pool_lock: PoolLock::new(size),
         }))
     }
@@ -262,11 +276,29 @@ impl<M: Manager + Send> Pool<M> {
         Ok(())
     }
 
+    /// Pause the pool
+    ///
+    /// these functionalities will stop:
+    /// - get connection. `Pool::get()` would eventually be timed out(If `Manager::timeout` is manually implemented with proper timeout function).
+    /// - spawn of new connection.
+    /// - default scheduled works (They would skip at least one iteration if the schedule time come across with the time period the pool is paused).
+    /// - put back connection. (connection will be dropped instead.)
+    pub fn pause(&self) {
+        self.0.if_running(false);
+    }
+
+    /// start the pool.
+    // ToDo: for now pool would lose accuracy for min_idle after restart. It would recover after certain amount of requests to pool.
+    pub fn resume(&self) {
+        self.0.if_running(true);
+    }
+
     /// Return a `PoolRef` contains reference of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
     ///
     /// The `PoolRef` should be dropped asap when you finish the use of it. Hold it in scope would prevent the connection from pushed back to pool.
     pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
         let shared_pool = &self.0;
+
         shared_pool.get_conn(shared_pool, 0).await
     }
 
@@ -277,8 +309,7 @@ impl<M: Manager + Send> Pool<M> {
         E: From<M::Error>,
         T: Send + 'static,
     {
-        let shared_pool = &self.0;
-        let mut pool_ref = shared_pool.get_conn(shared_pool, 0).await?;
+        let mut pool_ref = self.get().await?;
         f(&mut *pool_ref).await
     }
 
@@ -362,19 +393,26 @@ impl<M: Manager + Send> PoolRef<'_, M> {
 impl<M: Manager + Send> Drop for PoolRef<'_, M> {
     #[inline]
     fn drop(&mut self) {
+        let shared_pool = self.shared_pool;
+
+        if !shared_pool.is_running() {
+            shared_pool.drop_conn(false);
+            return;
+        }
+
         let mut conn = match self.conn.take() {
             Some(conn) => conn,
             None => {
-                spawn_drop(self.shared_pool);
+                spawn_drop(shared_pool);
                 return;
             }
         };
 
-        let is_closed = self.shared_pool.manager.is_closed(&mut conn.conn);
+        let is_closed = shared_pool.manager.is_closed(&mut conn.conn);
         if is_closed {
-            spawn_drop(self.shared_pool);
+            spawn_drop(shared_pool);
         } else {
-            self.shared_pool.pool_lock.put_back(conn.into());
+            shared_pool.pool_lock.put_back(conn.into());
         };
     }
 }
@@ -383,7 +421,7 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
 // Conn<M> should be dropped in place where spawn_drop() is used.
 // ToDo: Will get unsolvable pending if the spawn is panic;
 fn spawn_drop<M: Manager + Send>(shared_pool: &Arc<ManagedPool<M>>) {
-    if let Some(pending) = shared_pool.drop_conn() {
+    if let Some(pending) = shared_pool.drop_conn(true) {
         let shared_clone = shared_pool.clone();
         shared_pool.spawn(async move {
             let _ = shared_clone.replenish_idle_conn(pending).await;
