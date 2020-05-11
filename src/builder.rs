@@ -1,11 +1,12 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crate::manager::Manager;
 use crate::pool::Pool;
 
 pub struct Builder {
-    pub(crate) max_size: u8,
-    pub(crate) min_idle: u8,
+    pub(crate) max_size: AtomicUsize,
+    pub(crate) min_idle: usize,
     pub(crate) always_check: bool,
     pub(crate) use_gc: bool,
     pub(crate) max_lifetime: Option<Duration>,
@@ -18,7 +19,7 @@ pub struct Builder {
 impl Default for Builder {
     fn default() -> Self {
         Builder {
-            max_size: 10,
+            max_size: AtomicUsize::new(10),
             min_idle: 1,
             always_check: true,
             use_gc: false,
@@ -36,12 +37,12 @@ impl Builder {
         Default::default()
     }
 
-    pub fn max_size(mut self, max_size: u8) -> Builder {
-        self.max_size = max_size;
+    pub fn max_size(self, max_size: usize) -> Builder {
+        self.set_max_size(max_size);
         self
     }
 
-    pub fn min_idle(mut self, min_idle: u8) -> Builder {
+    pub fn min_idle(mut self, min_idle: usize) -> Builder {
         self.min_idle = min_idle;
         self
     }
@@ -126,7 +127,7 @@ impl Builder {
     /// Consumes the `Builder`, returning a new, initialized `Pool`.
     pub async fn build<M: Manager>(self, manager: M) -> Result<Pool<M>, M::Error> {
         assert!(
-            self.max_size >= self.min_idle,
+            self.get_max_size() >= self.min_idle,
             "min_idle must be no larger than max_size"
         );
 
@@ -141,7 +142,7 @@ impl Builder {
     /// (`Pool` have no connection and scheduled tasks like connection reaper and garbage collect)
     pub fn build_uninitialized<M: Manager>(self, manager: M) -> Result<Pool<M>, M::Error> {
         assert!(
-            self.max_size >= self.min_idle,
+            self.get_max_size() >= self.min_idle,
             "min_idle must be no larger than max_size"
         );
 
@@ -151,5 +152,13 @@ impl Builder {
     /// expose `reaper_rate` to public.
     pub fn get_reaper_rate(&self) -> Duration {
         self.reaper_rate
+    }
+
+    pub(crate) fn set_max_size(&self, size: usize) {
+        self.max_size.store(size, Ordering::Relaxed);
+    }
+
+    pub(crate) fn get_max_size(&self) -> usize {
+        self.max_size.load(Ordering::Relaxed)
     }
 }

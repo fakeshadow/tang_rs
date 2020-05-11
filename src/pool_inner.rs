@@ -32,31 +32,35 @@ impl Pending {
 
 // PoolInner holds all the IdleConn and the waiters(a FIFO linked list) waiting for a connection.
 pub(crate) struct PoolInner<M: Manager> {
-    spawned: u8,
+    spawned: usize,
     pending: VecDeque<Pending>,
     conn: VecDeque<IdleConn<M>>,
     waiters: WakerList,
 }
 
 impl<M: Manager> PoolInner<M> {
-    fn decr_spawned_inner(&mut self) {
+    fn put_back(&mut self, conn: IdleConn<M>) {
+        self.conn.push_back(conn);
+    }
+
+    fn decr_spawned(&mut self) {
         if self.spawned != 0 {
             self.spawned -= 1;
         }
     }
 
-    fn decr_pending_inner(&mut self, count: u8) {
+    fn decr_pending(&mut self, count: usize) {
         for _i in 0..count {
             self.pending.pop_front();
         }
     }
 
     #[inline]
-    fn total(&mut self) -> u8 {
-        self.spawned + self.pending.len() as u8
+    fn total(&mut self) -> usize {
+        self.spawned + self.pending.len()
     }
 
-    fn incr_pending_inner(&mut self, count: u8) {
+    fn incr_pending(&mut self, count: usize) {
         for _i in 0..count {
             self.pending.push_back(Pending::new());
         }
@@ -94,16 +98,16 @@ impl<M: Manager> PoolLock<M> {
 
     // add pending directly to pool inner if we try to spawn new connections.
     // and return the new pending count as option to notify the Pool to replenish connections
-    pub(crate) fn decr_spawned(&self, min_idle: u8, should_spawn_new: bool) -> Option<u8> {
+    pub(crate) fn decr_spawned(&self, min_idle: usize, should_spawn_new: bool) -> Option<usize> {
         self.inner
             .lock()
             .map(|mut inner| {
-                inner.decr_spawned_inner();
+                inner.decr_spawned();
 
                 let total = inner.total();
                 if total < min_idle && should_spawn_new {
                     let pending_new = min_idle - total;
-                    inner.incr_pending_inner(pending_new);
+                    inner.incr_pending(pending_new);
                     Some(pending_new)
                 } else {
                     None
@@ -112,8 +116,8 @@ impl<M: Manager> PoolLock<M> {
             .unwrap()
     }
 
-    pub(crate) fn decr_pending(&self, count: u8) {
-        self.inner.lock().unwrap().decr_pending_inner(count);
+    pub(crate) fn decr_pending(&self, count: usize) {
+        self.inner.lock().unwrap().decr_pending(count);
     }
 
     pub(crate) fn drop_pendings<F>(&self, mut should_drop: F)
@@ -137,7 +141,7 @@ impl<M: Manager> PoolLock<M> {
     }
 
     // return new pending count as Option<u8>.
-    pub(crate) fn try_drop_conns<F>(&self, min_idle: u8, mut should_drop: F) -> Option<u8>
+    pub(crate) fn try_drop_conns<F>(&self, min_idle: usize, mut should_drop: F) -> Option<usize>
     where
         F: FnMut(&IdleConn<M>) -> bool,
     {
@@ -147,7 +151,7 @@ impl<M: Manager> PoolLock<M> {
                 if let Some(conn) = inner.conn.get(index) {
                     if should_drop(conn) {
                         inner.conn.remove(index);
-                        inner.decr_spawned_inner();
+                        inner.decr_spawned();
                     }
                 }
             }
@@ -156,7 +160,7 @@ impl<M: Manager> PoolLock<M> {
             if total_now < min_idle {
                 let pending_new = min_idle - total_now;
 
-                inner.incr_pending_inner(pending_new);
+                inner.incr_pending(pending_new);
 
                 Some(pending_new)
             } else {
@@ -166,23 +170,28 @@ impl<M: Manager> PoolLock<M> {
     }
 
     #[inline]
-    pub(crate) fn put_back(&self, conn: IdleConn<M>) {
+    pub(crate) fn put_back(&self, conn: IdleConn<M>, max_size: usize) {
         self.inner
             .lock()
             .map(|mut inner| {
-                inner.conn.push_back(conn);
+                if inner.spawned > max_size {
+                    inner.decr_spawned();
+                } else {
+                    inner.put_back(conn);
+                }
+
                 inner.waiters.wake_one_weak()
             })
             .unwrap()
             .wake();
     }
 
-    pub(crate) fn put_back_incr_spawned(&self, conn: IdleConn<M>) {
+    pub(crate) fn put_back_incr_spawned(&self, conn: IdleConn<M>, max_size: usize) {
         self.inner
             .lock()
             .map(|mut inner| {
-                inner.decr_pending_inner(1);
-                if (inner.spawned as usize) < inner.conn.capacity() {
+                inner.decr_pending(1);
+                if inner.spawned < max_size {
                     inner.conn.push_back(conn);
                     inner.spawned += 1;
                 }
@@ -197,7 +206,7 @@ impl<M: Manager> PoolLock<M> {
             .lock()
             .map(|inner| State {
                 connections: inner.spawned,
-                idle_connections: inner.conn.len() as u8,
+                idle_connections: inner.conn.len(),
                 pending_connections: inner.pending.iter().cloned().collect(),
             })
             .unwrap()
@@ -249,12 +258,12 @@ impl<'re, M: Manager> PoolLockFuture<'re, M> {
 
         let builder = shared.get_builder();
 
-        if inner.total() < builder.max_size {
+        if inner.total() < builder.get_max_size() {
             let shared_clone = shared.clone();
             shared.spawn(async move {
                 let _ = shared_clone.add_idle_conn().await;
             });
-            inner.incr_pending_inner(1);
+            inner.incr_pending(1);
         }
     }
 
@@ -327,8 +336,8 @@ unsafe impl<M: Manager + Send> Send for PoolLock<M> {}
 unsafe impl<M: Manager + Send> Sync for PoolLock<M> {}
 
 pub struct State {
-    pub connections: u8,
-    pub idle_connections: u8,
+    pub connections: usize,
+    pub idle_connections: usize,
     pub pending_connections: Vec<Pending>,
 }
 

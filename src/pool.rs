@@ -96,7 +96,7 @@ impl<M: Manager + Send> ManagedPool<M> {
         })
     }
 
-    fn drop_conn(&self, should_spawn_new: bool) -> Option<u8> {
+    fn drop_conn(&self, should_spawn_new: bool) -> Option<usize> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
         self.pool_lock
@@ -120,7 +120,8 @@ impl<M: Manager + Send> ManagedPool<M> {
                 e
             })?;
 
-        self.pool_lock.put_back_incr_spawned(IdleConn::new(conn));
+        self.pool_lock
+            .put_back_incr_spawned(IdleConn::new(conn), self.builder.get_max_size());
 
         Ok(())
     }
@@ -135,7 +136,7 @@ impl<M: Manager + Send> ManagedPool<M> {
         Ok(res)
     }
 
-    async fn replenish_idle_conn(&self, pending_count: u8) -> Result<(), M::Error> {
+    async fn replenish_idle_conn(&self, pending_count: usize) -> Result<(), M::Error> {
         for i in 0..pending_count {
             self.add_idle_conn().await.map_err(|e| {
                 // we return when an error occur so we should drop all the pending after the i.
@@ -224,7 +225,7 @@ impl<M: Manager + Send> Drop for Pool<M> {
 
 impl<M: Manager + Send> Pool<M> {
     pub(crate) fn new(builder: Builder, manager: M) -> Self {
-        let size = builder.max_size as usize;
+        let size = builder.get_max_size();
 
         Pool(Arc::new(ManagedPool {
             builder,
@@ -279,7 +280,7 @@ impl<M: Manager + Send> Pool<M> {
     /// Pause the pool
     ///
     /// these functionalities will stop:
-    /// - get connection. `Pool::get()` would eventually be timed out(If `Manager::timeout` is manually implemented with proper timeout function).
+    /// - get connection. `Pool<Manager>::get()` would eventually be timed out(If `Manager::timeout` is manually implemented with proper timeout function).
     /// - spawn of new connection.
     /// - default scheduled works (They would skip at least one iteration if the schedule time come across with the time period the pool is paused).
     /// - put back connection. (connection will be dropped instead.)
@@ -311,6 +312,14 @@ impl<M: Manager + Send> Pool<M> {
     {
         let mut pool_ref = self.get().await?;
         f(&mut *pool_ref).await
+    }
+
+    /// Change the max size of pool. This operation could result in some reallocation of `PoolInner` and impact the performance.
+    ///
+    /// No actual check is used for new `max_size`. Be ware not to pass an max size smaller than `min_idle`.
+    // ToDo: make Builder.min_idle atomic and change it accordingly
+    pub fn set_max_size(&self, size: usize) {
+        self.0.builder.set_max_size(size);
     }
 
     /// expose `Manager` to public
@@ -412,7 +421,9 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
         if is_closed {
             spawn_drop(shared_pool);
         } else {
-            shared_pool.pool_lock.put_back(conn.into());
+            shared_pool
+                .pool_lock
+                .put_back(conn.into(), shared_pool.builder.get_max_size());
         };
     }
 }

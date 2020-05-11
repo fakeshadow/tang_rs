@@ -1,3 +1,9 @@
+(May 12, 2020)
+----------------------
+### Add
+- `Pool<Manager>::set_max_size` to change the max size of pool on the fly.
+  
+
 (May 11, 2020)
 ----------------------
 ### Add

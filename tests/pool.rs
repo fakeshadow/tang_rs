@@ -386,3 +386,40 @@ async fn pause() {
     assert_eq!(8, state.idle_connections);
     assert_eq!(0, state.pending_connections.len());
 }
+
+#[async_std::test]
+async fn set_max() {
+    test_pool!(1, 100);
+
+    let mgr = TestPoolManager(AtomicUsize::new(0));
+
+    let pool = Builder::new()
+        .always_check(false)
+        .min_idle(4)
+        .max_size(16)
+        .build(mgr)
+        .await
+        .expect("fail to build pool");
+
+    let mut conns = Vec::new();
+    for _i in 0..16 {
+        let conn = pool.get().await.unwrap();
+        conns.push(conn);
+    }
+
+    let state = pool.state();
+
+    assert_eq!(16, state.connections);
+    assert_eq!(0, state.idle_connections);
+    assert_eq!(0, state.pending_connections.len());
+
+    pool.set_max_size(7);
+
+    drop(conns);
+
+    let state = pool.state();
+
+    assert_eq!(7, state.connections);
+    assert_eq!(7, state.idle_connections);
+    assert_eq!(0, state.pending_connections.len());
+}
