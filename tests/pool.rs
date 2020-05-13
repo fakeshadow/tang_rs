@@ -9,9 +9,10 @@ use async_std::{
     stream::{interval, Interval},
     task,
 };
+
 use tang_rs::{
-    Builder, GarbageCollect, Manager, ManagerFuture, ManagerInterval, PoolRef, ScheduleReaping,
-    SharedManagedPool,
+    Builder, GarbageCollect, Manager, ManagerFuture, ManagerInterval, Pool, PoolRef,
+    ScheduleReaping, SharedManagedPool,
 };
 
 macro_rules! test_pool {
@@ -106,11 +107,7 @@ async fn limit() {
         .await
         .expect("fail to build pool");
 
-    let state = pool.state();
-
-    assert_eq!(0, state.pending_connections.len());
-    assert_eq!(10, state.connections);
-    assert_eq!(10, state.idle_connections);
+    pool_state(&pool, 10, 10, 0);
 
     let mut conns = Vec::new();
 
@@ -129,11 +126,7 @@ async fn limit() {
 
     drop(conns);
 
-    let state = pool.state();
-
-    assert_eq!(0, state.pending_connections.len());
-    assert_eq!(12, state.connections);
-    assert_eq!(12, state.idle_connections);
+    pool_state(&pool, 12, 12, 0);
 }
 
 #[async_std::test]
@@ -178,10 +171,7 @@ async fn valid_closed() {
 
     interval.next().await;
 
-    let state = pool.state();
-    assert_eq!(4, state.idle_connections);
-    assert_eq!(4, state.connections);
-    assert_eq!(0, state.pending_connections.len());
+    pool_state(&pool, 4, 4, 0);
 }
 
 #[async_std::test]
@@ -228,10 +218,7 @@ async fn retry_limit() {
 
     interval.next().await;
 
-    let state = pool.state();
-    assert_eq!(4, state.idle_connections);
-    assert_eq!(4, state.connections);
-    assert_eq!(0, state.pending_connections.len());
+    pool_state(&pool, 4, 4, 0);
 }
 
 #[async_std::test]
@@ -259,19 +246,13 @@ async fn idle_timeout() {
     assert_eq!(8, conns.len());
     drop(conns);
 
-    let state = pool.state();
-    assert_eq!(4, state.idle_connections);
-    assert_eq!(4, state.connections);
-    assert_eq!(0, state.pending_connections.len());
+    pool_state(&pool, 4, 4, 0);
 
     let mut interval = interval(Duration::from_secs(6));
 
     interval.next().await;
 
-    let state = pool.state();
-    assert_eq!(2, state.idle_connections);
-    assert_eq!(2, state.connections);
-    assert_eq!(0, state.pending_connections.len());
+    pool_state(&pool, 2, 2, 0);
 }
 
 #[async_std::test]
@@ -308,10 +289,7 @@ async fn max_lifetime() {
 
     interval.next().await;
 
-    let state = pool.state();
-    assert_eq!(2, state.idle_connections);
-    assert_eq!(2, state.connections);
-    assert_eq!(0, state.pending_connections.len());
+    pool_state(&pool, 2, 2, 0);
 }
 
 #[async_std::test]
@@ -353,11 +331,7 @@ async fn pause() {
 
     drop(conns);
 
-    let state = pool.state();
-
-    assert_eq!(0, state.connections);
-    assert_eq!(0, state.idle_connections);
-    assert_eq!(0, state.pending_connections.len());
+    pool_state(&pool, 0, 0, 0);
 
     pool.resume();
 
@@ -371,20 +345,13 @@ async fn pause() {
 
     pool.pause();
 
-    let state = pool.state();
-
-    assert_eq!(16, state.connections);
-    assert_eq!(16, state.idle_connections);
-    assert_eq!(0, state.pending_connections.len());
+    pool_state(&pool, 16, 16, 0);
 
     pool.resume();
 
     task::sleep(Duration::from_secs(2)).await;
 
-    let state = pool.state();
-    assert_eq!(8, state.connections);
-    assert_eq!(8, state.idle_connections);
-    assert_eq!(0, state.pending_connections.len());
+    pool_state(&pool, 8, 8, 0);
 }
 
 #[async_std::test]
@@ -407,19 +374,60 @@ async fn set_max() {
         conns.push(conn);
     }
 
-    let state = pool.state();
-
-    assert_eq!(16, state.connections);
-    assert_eq!(0, state.idle_connections);
-    assert_eq!(0, state.pending_connections.len());
+    pool_state(&pool, 16, 0, 0);
 
     pool.set_max_size(7);
 
     drop(conns);
 
+    pool_state(&pool, 7, 7, 0);
+}
+
+#[async_std::test]
+async fn clear() {
+    test_pool!(1, 100);
+
+    let mgr = TestPoolManager(AtomicUsize::new(0));
+
+    let pool = Builder::new()
+        .always_check(false)
+        .min_idle(16)
+        .max_size(16)
+        .build(mgr)
+        .await
+        .expect("fail to build pool");
+
+    let mut conns = Vec::new();
+    for _i in 0..8 {
+        let conn = pool.get().await.unwrap();
+        conns.push(conn);
+    }
+
+    pool_state(&pool, 16, 8, 0);
+
+    pool.clear();
+
+    pool_state(&pool, 8, 0, 0);
+
+    let mut pool_ref = conns.pop().unwrap();
+    let _ = pool_ref.take_conn();
+
+    drop(pool_ref);
+
+    let mut pool_ref = conns.pop().unwrap();
+    let _ = pool_ref.push_conn(80usize);
+
+    drop(pool_ref);
+
+    drop(conns);
+
+    pool_state(&pool, 0, 0, 0);
+}
+
+fn pool_state<M: Manager>(pool: &Pool<M>, conn: usize, idle: usize, pending: usize) {
     let state = pool.state();
 
-    assert_eq!(7, state.connections);
-    assert_eq!(7, state.idle_connections);
-    assert_eq!(0, state.pending_connections.len());
+    assert_eq!(conn, state.connections);
+    assert_eq!(idle, state.idle_connections);
+    assert_eq!(pending, state.pending_connections.len());
 }

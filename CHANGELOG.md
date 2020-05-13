@@ -1,3 +1,9 @@
+(May 13, 2020)
+----------------------
+### Add
+- `Pool<Manager>::clear` to clear the pool.
+  
+
 (May 12, 2020)
 ----------------------
 ### Add

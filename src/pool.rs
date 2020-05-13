@@ -14,7 +14,14 @@ use crate::pool_inner::{PoolLock, State};
 
 pub struct Conn<M: Manager> {
     conn: M::Connection,
+    marker: Option<usize>,
     birth: Instant,
+}
+
+impl<M: Manager> Conn<M> {
+    pub(crate) fn get_marker(&self) -> Option<usize> {
+        self.marker
+    }
 }
 
 pub struct IdleConn<M: Manager> {
@@ -26,9 +33,21 @@ impl<M: Manager> IdleConn<M> {
     fn new(conn: M::Connection) -> Self {
         let now = Instant::now();
         IdleConn {
-            conn: Conn { conn, birth: now },
+            conn: Conn {
+                conn,
+                marker: None,
+                birth: now,
+            },
             idle_start: now,
         }
+    }
+
+    pub(crate) fn set_marker(&mut self, marker: usize) {
+        self.conn.marker = Some(marker);
+    }
+
+    pub(crate) fn get_marker(&self) -> Option<usize> {
+        self.conn.marker
     }
 }
 
@@ -47,6 +66,7 @@ impl<M: Manager> From<IdleConn<M>> for Conn<M> {
         Conn {
             conn: conn.conn.conn,
             birth: conn.conn.birth,
+            marker: conn.conn.marker,
         }
     }
 }
@@ -96,11 +116,11 @@ impl<M: Manager + Send> ManagedPool<M> {
         })
     }
 
-    fn drop_conn(&self, should_spawn_new: bool) -> Option<usize> {
+    fn drop_conn(&self, marker: Option<usize>, should_spawn_new: bool) -> Option<usize> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
         self.pool_lock
-            .decr_spawned(self.builder.min_idle, should_spawn_new)
+            .decr_spawned(marker, self.builder.min_idle, should_spawn_new)
     }
 
     pub(crate) async fn add_idle_conn(&self) -> Result<(), M::Error> {
@@ -314,6 +334,20 @@ impl<M: Manager + Send> Pool<M> {
         f(&mut *pool_ref).await
     }
 
+    /// Clear the pool.
+    ///
+    /// All pending connections will also be destroyed.
+    ///
+    /// Spawned count is not reset to 0 so new connections can't fill the pool until all outgoing `PoolRef` are dropped.
+    ///
+    /// All `PoolRef` outside of pool before the clear happen would be destroyed when trying to return it's connection to pool.
+    pub fn clear(&self) {
+        let shared_pool = &self.0;
+        shared_pool
+            .pool_lock
+            .clear(shared_pool.builder.get_max_size())
+    }
+
     /// Change the max size of pool. This operation could result in some reallocation of `PoolInner` and impact the performance.
     ///
     /// No actual check is used for new `max_size`. Be ware not to pass an max size smaller than `min_idle`.
@@ -336,6 +370,8 @@ impl<M: Manager + Send> Pool<M> {
 pub struct PoolRef<'a, M: Manager + Send> {
     conn: Option<Conn<M>>,
     shared_pool: &'a Arc<ManagedPool<M>>,
+    // marker is only used to store the marker of Conn<M> if it's been taken from pool
+    marker: Option<usize>,
 }
 
 impl<'a, M: Manager + Send> PoolRef<'a, M> {
@@ -343,6 +379,7 @@ impl<'a, M: Manager + Send> PoolRef<'a, M> {
         PoolRef {
             conn: Some(conn.into()),
             shared_pool,
+            marker: None,
         }
     }
 }
@@ -381,15 +418,26 @@ impl<M: Manager + Send> PoolRef<'_, M> {
 
     /// take the the ownership of connection from pool and it won't be pushed back to pool anymore.
     pub fn take_conn(&mut self) -> Option<M::Connection> {
-        self.conn.take().map(|c| c.conn)
+        self.conn.take().map(|c| {
+            self.marker = c.marker;
+            c.conn
+        })
     }
 
     /// manually push a connection to pool. We treat this connection as a new born one.
     ///
     /// operation will fail if the pool is already in full capacity(no error will return and this connection will be dropped silently)
     pub fn push_conn(&mut self, conn: M::Connection) {
+        // if the PoolRef have a marker then the conn must have been taken.
+        // otherwise we give the marker of sle.conn to the newly generated one.
+        let marker = match self.marker {
+            Some(marker) => Some(marker),
+            None => self.conn.as_ref().map(|c| c.get_marker()).unwrap(),
+        };
+
         self.conn = Some(Conn {
             conn,
+            marker,
             birth: Instant::now(),
         });
     }
@@ -405,21 +453,21 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
         let shared_pool = self.shared_pool;
 
         if !shared_pool.is_running() {
-            shared_pool.drop_conn(false);
+            shared_pool.drop_conn(self.marker, false);
             return;
         }
 
         let mut conn = match self.conn.take() {
             Some(conn) => conn,
             None => {
-                spawn_drop(shared_pool);
+                spawn_drop(self.marker, shared_pool);
                 return;
             }
         };
 
         let is_closed = shared_pool.manager.is_closed(&mut conn.conn);
         if is_closed {
-            spawn_drop(shared_pool);
+            spawn_drop(conn.marker, shared_pool);
         } else {
             shared_pool
                 .pool_lock
@@ -431,8 +479,8 @@ impl<M: Manager + Send> Drop for PoolRef<'_, M> {
 // helper function to spawn drop connection and spawn new ones if needed.
 // Conn<M> should be dropped in place where spawn_drop() is used.
 // ToDo: Will get unsolvable pending if the spawn is panic;
-fn spawn_drop<M: Manager + Send>(shared_pool: &Arc<ManagedPool<M>>) {
-    if let Some(pending) = shared_pool.drop_conn(true) {
+fn spawn_drop<M: Manager + Send>(marker: Option<usize>, shared_pool: &Arc<ManagedPool<M>>) {
+    if let Some(pending) = shared_pool.drop_conn(marker, true) {
         let shared_clone = shared_pool.clone();
         shared_pool.spawn(async move {
             let _ = shared_clone.replenish_idle_conn(pending).await;
