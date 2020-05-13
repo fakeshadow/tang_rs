@@ -40,19 +40,20 @@ pub(crate) struct PoolInner<M: Manager> {
 }
 
 impl<M: Manager> PoolInner<M> {
+    #[inline]
     fn put_back(&mut self, conn: IdleConn<M>) {
         self.conn.push_back(conn);
     }
 
     fn incr_spawned(&mut self, count: usize) {
-        self.spawned = self.spawned + count;
+        self.spawned += count;
     }
 
     fn decr_spawned(&mut self, count: usize) {
-        self.spawned = if self.spawned > count {
-            self.spawned - count
+        if self.spawned > count {
+            self.spawned -= count
         } else {
-            0
+            self.spawned = 0
         }
     }
 
@@ -228,6 +229,7 @@ impl<M: Manager> PoolLock<M> {
                     conn.set_marker(inner.marker);
                     inner.put_back(conn);
                     inner.incr_spawned(1);
+
                 }
                 inner.waiters.wake_one_weak()
             })
