@@ -121,7 +121,7 @@ impl<M: Manager> PoolLock<M> {
     // and return the new pending count as option to notify the Pool to replenish connections
     pub(crate) fn decr_spawned(
         &self,
-        marker: Option<usize>,
+        marker: usize,
         min_idle: usize,
         should_spawn_new: bool,
     ) -> Option<usize> {
@@ -132,13 +132,7 @@ impl<M: Manager> PoolLock<M> {
 
                 let total = inner.total();
 
-                // we match the same marker as inner.marker to true and give a free pass if marker is None
-                let match_marker = match marker {
-                    Some(marker) => marker == inner.marker,
-                    None => true,
-                };
-
-                if total < min_idle && should_spawn_new && match_marker {
+                if total < min_idle && should_spawn_new && marker == inner.marker {
                     let pending_new = min_idle - total;
                     inner.incr_pending(pending_new);
                     Some(pending_new)
@@ -173,8 +167,12 @@ impl<M: Manager> PoolLock<M> {
             .unwrap()
     }
 
-    // return new pending count as Option<usize>.
-    pub(crate) fn try_drop_conns<F>(&self, min_idle: usize, mut should_drop: F) -> Option<usize>
+    // return new pending count and marker as Option<(usize, usize)>.
+    pub(crate) fn try_drop_conns<F>(
+        &self,
+        min_idle: usize,
+        mut should_drop: F,
+    ) -> Option<(usize, usize)>
     where
         F: FnMut(&IdleConn<M>) -> bool,
     {
@@ -195,7 +193,7 @@ impl<M: Manager> PoolLock<M> {
 
                 inner.incr_pending(pending_new);
 
-                Some(pending_new)
+                Some((pending_new, inner.marker))
             } else {
                 None
             }
@@ -207,8 +205,7 @@ impl<M: Manager> PoolLock<M> {
         self.inner
             .lock()
             .map(|mut inner| {
-                let marker = conn.get_marker().unwrap_or(inner.marker);
-                if inner.spawned > max_size || inner.marker != marker {
+                if inner.spawned > max_size || inner.marker != conn.get_marker() {
                     inner.decr_spawned(1);
                     None
                 } else {
@@ -220,18 +217,18 @@ impl<M: Manager> PoolLock<M> {
             .wake();
     }
 
-    pub(crate) fn put_back_incr_spawned(&self, mut conn: IdleConn<M>, max_size: usize) {
+    pub(crate) fn put_back_incr_spawned(&self, conn: IdleConn<M>, max_size: usize) {
         self.inner
             .lock()
             .map(|mut inner| {
                 inner.decr_pending(1);
-                if inner.spawned < max_size {
-                    conn.set_marker(inner.marker);
+                if inner.spawned < max_size && inner.marker == conn.get_marker() {
                     inner.put_back(conn);
                     inner.incr_spawned(1);
-
+                    inner.waiters.wake_one_weak()
+                } else {
+                    None
                 }
-                inner.waiters.wake_one_weak()
             })
             .unwrap()
             .wake();
@@ -248,6 +245,10 @@ impl<M: Manager> PoolLock<M> {
                 inner.clear_conn(pool_size);
             })
             .unwrap()
+    }
+
+    pub(crate) fn get_maker(&self) -> usize {
+        self.inner.lock().map(|inner| inner.marker).unwrap()
     }
 
     pub(crate) fn state(&self) -> State {
@@ -308,9 +309,10 @@ impl<'re, M: Manager> PoolLockFuture<'re, M> {
         let builder = shared.get_builder();
 
         if inner.total() < builder.get_max_size() {
+            let marker = inner.marker;
             let shared_clone = shared.clone();
             shared.spawn(async move {
-                let _ = shared_clone.add_idle_conn().await;
+                let _ = shared_clone.add_idle_conn(marker).await;
             });
             inner.incr_pending(1);
         }

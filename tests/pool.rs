@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_std::{
-    future::timeout,
+    future::{timeout, TimeoutError},
     prelude::*,
     stream::{interval, Interval},
     task,
@@ -20,6 +20,12 @@ macro_rules! test_pool {
         struct TestPoolManager(AtomicUsize);
 
         struct TestPoolError;
+
+        impl From<TimeoutError> for TestPoolError {
+            fn from(_: TimeoutError) -> Self {
+                TestPoolError
+            }
+        }
 
         impl Debug for TestPoolError {
             fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
@@ -49,7 +55,7 @@ macro_rules! test_pool {
         impl Manager for TestPoolManager {
             type Connection = usize;
             type Error = TestPoolError;
-            type TimeoutError = TestPoolError;
+            type TimeoutError = TimeoutError;
 
             fn connect(&self) -> ManagerFuture<'_, Result<Self::Connection, Self::Error>> {
                 Box::pin(async move { Ok(self.0.fetch_add(1, Ordering::SeqCst)) })
@@ -81,6 +87,17 @@ macro_rules! test_pool {
                 Fut: Future<Output = ()> + Send + 'static,
             {
                 task::spawn(fut);
+            }
+
+            fn timeout<'fu, Fut>(
+                &self,
+                fut: Fut,
+                dur: Duration,
+            ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
+            where
+                Fut: Future + Send + 'fu,
+            {
+                Box::pin(timeout(dur, fut))
             }
 
             fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
@@ -302,6 +319,7 @@ async fn pause() {
         .always_check(false)
         .max_lifetime(Some(Duration::from_secs(1)))
         .reaper_rate(Duration::from_secs(1))
+        .wait_timeout(Duration::from_secs(2))
         .min_idle(8)
         .max_size(16)
         .build(mgr)
@@ -311,12 +329,12 @@ async fn pause() {
     pool.pause();
 
     let now = Instant::now();
-    let res = timeout(Duration::from_secs(3), pool.get()).await;
+    let res = pool.get().await;
 
     assert_eq!(true, res.is_err());
     assert_eq!(
         true,
-        Instant::now().duration_since(now) > Duration::from_secs(3)
+        Instant::now().duration_since(now) > Duration::from_secs(2)
     );
 
     pool.resume();
@@ -349,7 +367,7 @@ async fn pause() {
 
     pool.resume();
 
-    task::sleep(Duration::from_secs(2)).await;
+    task::sleep(Duration::from_secs(3)).await;
 
     pool_state(&pool, 8, 8, 0);
 }
