@@ -16,6 +16,8 @@ version = "1.2.0"
 
 [dependencies.redis_tang]
 path = "../../redis_tang"
+default-features = false
+features = [ "with-ntex" ]
 
 [dependencies.redis]
 version = "0.16.0"
@@ -34,3 +36,5 @@ version = "0.5.3"
 
 [dependencies.tokio_postgres_tang]
 path = "../../tokio_postgres_tang"
+default-features = false
+features = [ "with-ntex" ]

@@ -1,3 +1,9 @@
+(May 25, 2020)
+----------------------
+### Add
+- `Pool<Manager>::get_owned` to get a connection without any direct reference which can be moved to async blocks and across any await point.
+- `no-send` feature introduce a single threaded pool which have considerable more performance than multi threaded pool. Usage showed in `ntex_example`
+
 (May 13, 2020)
 ----------------------
 ### Add

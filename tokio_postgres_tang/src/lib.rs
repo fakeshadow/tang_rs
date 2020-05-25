@@ -99,7 +99,7 @@ use {
         task,
     },
 };
-#[cfg(feature = "with-tokio")]
+#[cfg(not(feature = "with-async-std"))]
 use {
     tokio::time::{interval, timeout, Elapsed as TimeoutError, Instant, Interval},
     tokio_postgres::{
@@ -108,7 +108,6 @@ use {
         Config, Error, Socket, Statement,
     },
 };
-
 pub struct PostgresManager<Tls>
 where
     Tls: MakeTlsConnect<Socket>,
@@ -187,7 +186,7 @@ macro_rules! impl_manager_interval {
     };
 }
 
-#[cfg(feature = "with-tokio")]
+#[cfg(not(feature = "with-async-std"))]
 impl_manager_interval!(Interval, Instant, tick);
 
 #[cfg(feature = "with-async-std")]
@@ -211,6 +210,7 @@ where
 {
 }
 
+#[cfg(not(feature = "with-ntex"))]
 macro_rules! impl_manager {
     ($connection: ty, $spawn: path, $timeout: ident) => {
         impl<Tls> Manager for PostgresManager<Tls>
@@ -226,7 +226,7 @@ macro_rules! impl_manager {
 
             fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
                 Box::pin(async move {
-                    #[cfg(feature = "with-tokio")]
+                    #[cfg(not(feature = "with-async-std"))]
                     let (c, conn) = self.config.connect(self.tls.clone()).await?;
 
                     // ToDo: fix this error convertion.
@@ -279,7 +279,7 @@ macro_rules! impl_manager {
 
             fn spawn<Fut>(&self, fut: Fut)
             where
-                Fut: Future<Output = ()> + Send + 'static,
+                Fut: Future<Output = ()> + 'static + Send,
             {
                 $spawn(fut);
             }
@@ -290,7 +290,7 @@ macro_rules! impl_manager {
                 dur: Duration,
             ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
             where
-                Fut: Future + Send + 'fu,
+                Fut: Future + 'fu + Send,
             {
                 Box::pin($timeout(dur, fut))
             }
@@ -301,6 +301,87 @@ macro_rules! impl_manager {
             }
         }
     };
+}
+
+#[cfg(feature = "with-ntex")]
+impl<Tls> Manager for PostgresManager<Tls>
+where
+    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
+    Tls::Stream: Send,
+    Tls::TlsConnect: Send,
+    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    type Connection = (Client, HashMap<String, Statement>);
+    type Error = PostgresPoolError;
+    type TimeoutError = TimeoutError;
+
+    fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
+        Box::pin(async move {
+            let (c, conn) = self.config.connect(self.tls.clone()).await?;
+
+            tokio::task::spawn_local(async move {
+                let _ = conn.await;
+            });
+
+            let prepares = self
+                .prepares
+                .read()
+                .expect("Failed to lock/read prepared statements")
+                .clone();
+
+            let mut sts = HashMap::with_capacity(prepares.len());
+            let mut futures = Vec::with_capacity(prepares.len());
+
+            // make prepared statements if there is any and set manager prepares for later use.
+            for p in prepares.iter() {
+                let (alias, PreparedStatement(query, types)) = p;
+                let alias = alias.to_string();
+                let future = c.prepare_typed(query, &types).map_ok(|st| (alias, st));
+                futures.push(future);
+            }
+
+            for result in join_all(futures).await.into_iter() {
+                let (alias, st) = result?;
+                sts.insert(alias, st);
+            }
+
+            Ok((c, sts))
+        })
+    }
+
+    fn is_valid<'a>(
+        &self,
+        c: &'a mut Self::Connection,
+    ) -> ManagerFuture<'a, Result<(), Self::Error>> {
+        Box::pin(c.0.simple_query("").map_ok(|_| ()).err_into())
+    }
+
+    fn is_closed(&self, conn: &mut Self::Connection) -> bool {
+        conn.0.is_closed()
+    }
+
+    fn spawn<Fut>(&self, fut: Fut)
+    where
+        Fut: Future<Output = ()> + 'static,
+    {
+        tokio::task::spawn_local(fut);
+    }
+
+    fn timeout<'fu, Fut>(
+        &self,
+        fut: Fut,
+        dur: Duration,
+    ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
+    where
+        Fut: Future + 'fu,
+    {
+        Box::pin(timeout(dur, fut))
+    }
+
+    fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
+        self.schedule_reaping(shared_pool);
+        self.garbage_collect(shared_pool);
+    }
 }
 
 #[cfg(feature = "with-tokio")]
@@ -320,8 +401,13 @@ where
     }
 }
 
+#[cfg(not(feature = "with-ntex"))]
 type StatementFuture<'a, SELF> =
     Pin<Box<dyn Future<Output = Result<&'a mut SELF, PostgresPoolError>> + Send + 'a>>;
+
+#[cfg(feature = "with-ntex")]
+type StatementFuture<'a, SELF> =
+    Pin<Box<dyn Future<Output = Result<&'a mut SELF, PostgresPoolError>> + 'a>>;
 
 /// helper trait for cached statement for this connection.
 /// Statements only work on the connection prepare them and not other connections in the pool.
@@ -470,3 +556,83 @@ impl From<TimeoutError> for PostgresPoolError {
         PostgresPoolError::TimeOut
     }
 }
+
+// impl<Tls> Manager for PostgresManager<Tls>
+// where
+//     Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
+//     Tls::Stream: Send,
+//     Tls::TlsConnect: Send,
+//     <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
+// {
+//     type Connection = (Client, HashMap<String, Statement>);
+//     type Error = PostgresPoolError;
+//     type TimeoutError = TimeoutError;
+//
+//     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
+//         Box::pin(async move {
+//             let (c, conn) = self.config.connect(self.tls.clone()).await?;
+//
+//             ntex_rt::spawn(async move {
+//                 let _ = conn.await;
+//             });
+//
+//             let prepares = self
+//                 .prepares
+//                 .read()
+//                 .expect("Failed to lock/read prepared statements")
+//                 .clone();
+//
+//             let mut sts = HashMap::with_capacity(prepares.len());
+//             let mut futures = Vec::with_capacity(prepares.len());
+//
+//             // make prepared statements if there is any and set manager prepares for later use.
+//             for p in prepares.iter() {
+//                 let (alias, PreparedStatement(query, types)) = p;
+//                 let alias = alias.to_string();
+//                 let future = c.prepare_typed(query, &types).map_ok(|st| (alias, st));
+//                 futures.push(future);
+//             }
+//
+//             for result in join_all(futures).await.into_iter() {
+//                 let (alias, st) = result?;
+//                 sts.insert(alias, st);
+//             }
+//
+//             Ok((c, sts))
+//         })
+//     }
+//
+//     fn is_valid<'a>(
+//         &self,
+//         c: &'a mut Self::Connection,
+//     ) -> ManagerFuture<'a, Result<(), Self::Error>> {
+//         Box::pin(c.0.simple_query("").map_ok(|_| ()).err_into())
+//     }
+//
+//     fn is_closed(&self, conn: &mut Self::Connection) -> bool {
+//         conn.0.is_closed()
+//     }
+//
+//     fn spawn<Fut>(&self, fut: Fut)
+//     where
+//         Fut: Future<Output = ()> + 'static,
+//     {
+//         tokio::task::spawn_local(fut);
+//     }
+//
+//     fn timeout<'fu, Fut>(
+//         &self,
+//         fut: Fut,
+//         dur: Duration,
+//     ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
+//     where
+//         Fut: Future + 'fu,
+//     {
+//         Box::pin(timeout(dur, fut))
+//     }
+//
+//     fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
+//         self.schedule_reaping(shared_pool);
+//         self.garbage_collect(shared_pool);
+//     }
+// }

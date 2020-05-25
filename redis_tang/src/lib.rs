@@ -1,5 +1,3 @@
-pub use tang_rs::{Builder, Pool, PoolRef};
-
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;
@@ -12,12 +10,14 @@ use async_std::{
     task,
 };
 use redis::{aio::MultiplexedConnection, Client, IntoConnectionInfo, RedisError};
-use tang_rs::{
-    GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping, SharedManagedPool,
-};
-#[cfg(feature = "with-tokio")]
+#[cfg(not(feature = "with-async-std"))]
 use tokio::time::{
     timeout, Elapsed as TimeoutError, {interval, Instant, Interval},
+};
+
+pub use tang_rs::{Builder, Pool, PoolRef};
+use tang_rs::{
+    GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping, SharedManagedPool,
 };
 
 #[derive(Clone)]
@@ -51,7 +51,7 @@ macro_rules! impl_manager_interval {
     };
 }
 
-#[cfg(feature = "with-tokio")]
+#[cfg(not(feature = "with-async-std"))]
 impl_manager_interval!(Interval, Instant, tick);
 
 #[cfg(feature = "with-async-std")]
@@ -61,6 +61,7 @@ impl ScheduleReaping for RedisManager {}
 
 impl GarbageCollect for RedisManager {}
 
+#[cfg(not(feature = "with-ntex"))]
 macro_rules! impl_manager {
     ($connection: ty, $get_connection: ident, $spawn: path, $timeout: ident, $interval_tick: ident) => {
         impl Manager for RedisManager {
@@ -113,6 +114,57 @@ macro_rules! impl_manager {
             }
         }
     };
+}
+
+#[cfg(feature = "with-ntex")]
+impl Manager for RedisManager {
+    type Connection = MultiplexedConnection;
+    type Error = RedisPoolError;
+    type TimeoutError = TimeoutError;
+
+    fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
+        Box::pin(async move {
+            let conn = self.client.get_multiplexed_tokio_connection().await?;
+            Ok(conn)
+        })
+    }
+
+    fn is_valid<'a>(
+        &self,
+        c: &'a mut Self::Connection,
+    ) -> ManagerFuture<'a, Result<(), Self::Error>> {
+        Box::pin(async move {
+            let _ = redis::cmd("PING").query_async(c).await?;
+            Ok(())
+        })
+    }
+
+    fn is_closed(&self, _conn: &mut Self::Connection) -> bool {
+        false
+    }
+
+    fn spawn<Fut>(&self, fut: Fut)
+    where
+        Fut: Future<Output = ()> + 'static,
+    {
+        tokio::task::spawn_local(fut);
+    }
+
+    fn timeout<'fu, Fut>(
+        &self,
+        fut: Fut,
+        dur: Duration,
+    ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
+    where
+        Fut: Future + 'fu,
+    {
+        Box::pin(timeout(dur, fut))
+    }
+
+    fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
+        self.schedule_reaping(shared_pool);
+        self.garbage_collect(shared_pool);
+    }
 }
 
 #[cfg(feature = "with-tokio")]

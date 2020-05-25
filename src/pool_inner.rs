@@ -1,16 +1,20 @@
+#[cfg(feature = "no-send")]
+use std::cell::{RefCell, RefMut};
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+#[cfg(not(feature = "no-send"))]
+use std::sync::{Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use crate::{
     manager::Manager,
-    pool::{IdleConn, ManagedPool, PoolRef},
+    pool::{IdleConn, PoolRef},
     util::linked_list::WakerList,
+    SharedManagedPool,
 };
 
 #[derive(Debug, Clone)]
@@ -40,6 +44,16 @@ pub(crate) struct PoolInner<M: Manager> {
 }
 
 impl<M: Manager> PoolInner<M> {
+    pub fn new(pool_size: usize) -> Self {
+        Self {
+            spawned: 0,
+            marker: 0,
+            pending: VecDeque::with_capacity(pool_size),
+            conn: VecDeque::with_capacity(pool_size),
+            waiters: WakerList::new(),
+        }
+    }
+
     #[inline]
     fn put_back(&mut self, conn: IdleConn<M>) {
         self.conn.push_back(conn);
@@ -87,27 +101,11 @@ impl<M: Manager> PoolInner<M> {
     }
 }
 
-pub(crate) struct PoolLock<M: Manager> {
-    inner: Mutex<PoolInner<M>>,
-}
-
 impl<M: Manager> PoolLock<M> {
-    pub(crate) fn new(pool_size: usize) -> Self {
-        PoolLock {
-            inner: Mutex::new(PoolInner {
-                spawned: 0,
-                marker: 0,
-                pending: VecDeque::with_capacity(pool_size),
-                conn: VecDeque::with_capacity(pool_size),
-                waiters: WakerList::new(),
-            }),
-        }
-    }
-
     #[inline]
     pub(crate) fn lock<'a>(
         &'a self,
-        shared_pool: &'a Arc<ManagedPool<M>>,
+        shared_pool: &'a SharedManagedPool<M>,
     ) -> PoolLockFuture<'a, M> {
         PoolLockFuture {
             shared_pool,
@@ -125,46 +123,41 @@ impl<M: Manager> PoolLock<M> {
         min_idle: usize,
         should_spawn_new: bool,
     ) -> Option<usize> {
-        self.inner
-            .lock()
-            .map(|mut inner| {
-                inner.decr_spawned(1);
+        let mut inner = self._lock();
 
-                let total = inner.total();
+        inner.decr_spawned(1);
 
-                if total < min_idle && should_spawn_new && marker == inner.marker {
-                    let pending_new = min_idle - total;
-                    inner.incr_pending(pending_new);
-                    Some(pending_new)
-                } else {
-                    None
-                }
-            })
-            .unwrap()
+        let total = inner.total();
+
+        if total < min_idle && should_spawn_new && marker == inner.marker {
+            let pending_new = min_idle - total;
+            inner.incr_pending(pending_new);
+            Some(pending_new)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn decr_pending(&self, count: usize) {
-        self.inner.lock().unwrap().decr_pending(count);
+        let mut inner = self._lock();
+        inner.decr_pending(count);
     }
 
     pub(crate) fn drop_pendings<F>(&self, mut should_drop: F)
     where
         F: FnMut(&Pending) -> bool,
     {
-        self.inner
-            .lock()
-            .map(|mut inner| {
-                let len = inner.pending.len();
+        let mut inner = self._lock();
 
-                for index in 0..len {
-                    if let Some(pending) = inner.pending.get(index) {
-                        if should_drop(pending) {
-                            inner.pending.remove(index);
-                        }
-                    }
+        let len = inner.pending.len();
+
+        for index in 0..len {
+            if let Some(pending) = inner.pending.get(index) {
+                if should_drop(pending) {
+                    inner.pending.remove(index);
                 }
-            })
-            .unwrap()
+            }
+        }
     }
 
     // return new pending count and marker as Option<(usize, usize)>.
@@ -176,7 +169,7 @@ impl<M: Manager> PoolLock<M> {
     where
         F: FnMut(&IdleConn<M>) -> bool,
     {
-        self.inner.try_lock().ok().and_then(|mut inner| {
+        self._try_lock().and_then(|mut inner| {
             let len = inner.conn.len();
             for index in 0..len {
                 if let Some(conn) = inner.conn.get(index) {
@@ -202,71 +195,58 @@ impl<M: Manager> PoolLock<M> {
 
     #[inline]
     pub(crate) fn put_back(&self, conn: IdleConn<M>, max_size: usize) {
-        self.inner
-            .lock()
-            .map(|mut inner| {
-                if inner.spawned > max_size || inner.marker != conn.get_marker() {
-                    inner.decr_spawned(1);
-                    None
-                } else {
-                    inner.put_back(conn);
-                    inner.waiters.wake_one_weak()
-                }
-            })
-            .unwrap()
-            .wake();
+        let mut inner = self._lock();
+        if inner.spawned > max_size || inner.marker != conn.get_marker() {
+            inner.decr_spawned(1);
+        } else {
+            inner.put_back(conn);
+            let opt = inner.waiters.wake_one_weak();
+            drop(inner);
+            opt.wake();
+        }
     }
 
     pub(crate) fn put_back_incr_spawned(&self, conn: IdleConn<M>, max_size: usize) {
-        self.inner
-            .lock()
-            .map(|mut inner| {
-                inner.decr_pending(1);
-                if inner.spawned < max_size && inner.marker == conn.get_marker() {
-                    inner.put_back(conn);
-                    inner.incr_spawned(1);
-                    inner.waiters.wake_one_weak()
-                } else {
-                    None
-                }
-            })
-            .unwrap()
-            .wake();
+        let mut inner = self._lock();
+
+        inner.decr_pending(1);
+        if inner.spawned < max_size && inner.marker == conn.get_marker() {
+            inner.put_back(conn);
+            inner.incr_spawned(1);
+            let opt = inner.waiters.wake_one_weak();
+            drop(inner);
+            opt.wake();
+        }
     }
 
     pub(crate) fn clear(&self, pool_size: usize) {
-        self.inner
-            .lock()
-            .map(|mut inner| {
-                let count = inner.conn.len();
-                inner.decr_spawned(count);
-                inner.incr_marker();
-                inner.clear_pending(pool_size);
-                inner.clear_conn(pool_size);
-            })
-            .unwrap()
+        let mut inner = self._lock();
+        let count = inner.conn.len();
+        inner.decr_spawned(count);
+        inner.incr_marker();
+        inner.clear_pending(pool_size);
+        inner.clear_conn(pool_size);
     }
 
     pub(crate) fn get_maker(&self) -> usize {
-        self.inner.lock().map(|inner| inner.marker).unwrap()
+        let inner = self._lock();
+        inner.marker
     }
 
     pub(crate) fn state(&self) -> State {
-        self.inner
-            .lock()
-            .map(|inner| State {
-                connections: inner.spawned,
-                idle_connections: inner.conn.len(),
-                pending_connections: inner.pending.iter().cloned().collect(),
-            })
-            .unwrap()
+        let inner = self._lock();
+        State {
+            connections: inner.spawned,
+            idle_connections: inner.conn.len(),
+            pending_connections: inner.pending.iter().cloned().collect(),
+        }
     }
 }
 
 // `PoolLockFuture` return a future of `PoolRef`. In the `Future` we pass it's `Waker` to `PoolLock`.
 // Then when a `IdleConn` is returned to pool we lock the `PoolLock` and wake the `Wakers` inside it to notify other `PoolLockFuture` it's time to continue.
 pub(crate) struct PoolLockFuture<'a, M: Manager> {
-    shared_pool: &'a Arc<ManagedPool<M>>,
+    shared_pool: &'a SharedManagedPool<M>,
     pool_lock: &'a PoolLock<M>,
     wait_key: Option<NonZeroUsize>,
     acquired: bool,
@@ -282,45 +262,9 @@ impl<M: Manager> Drop for PoolLockFuture<'_, M> {
 }
 
 impl<'re, M: Manager> PoolLockFuture<'re, M> {
-    #[inline]
-    fn poll_pool_ref(
-        &mut self,
-        inner: &mut MutexGuard<'re, PoolInner<M>>,
-        is_running: bool,
-    ) -> Poll<PoolRef<'re, M>> {
-        // we return pending status directly if the pool is in pausing state.
-        if !is_running {
-            return Poll::Pending;
-        }
-
-        match inner.conn.pop_front() {
-            Some(conn) => {
-                self.acquired = true;
-                Poll::Ready(PoolRef::new(conn, self.shared_pool))
-            }
-            None => Poll::Pending,
-        }
-    }
-
-    #[inline]
-    fn spawn_idle_conn(&self, inner: &mut MutexGuard<'_, PoolInner<M>>) {
-        let shared = self.shared_pool;
-
-        let builder = shared.get_builder();
-
-        if inner.total() < builder.get_max_size() {
-            let marker = inner.marker;
-            let shared_clone = shared.clone();
-            shared.spawn(async move {
-                let _ = shared_clone.add_idle_conn(marker).await;
-            });
-            inner.incr_pending(1);
-        }
-    }
-
     #[cold]
     fn wake_cold(&self, wait_key: NonZeroUsize) {
-        let mut inner = self.pool_lock.inner.lock().unwrap();
+        let mut inner = self.pool_lock._lock();
         let wait_key = unsafe { inner.waiters.remove(wait_key) };
 
         if wait_key.is_none() && !self.acquired {
@@ -332,16 +276,83 @@ impl<'re, M: Manager> PoolLockFuture<'re, M> {
     }
 }
 
+macro_rules! pool_lock {
+    ($lock_type: ident, $guard_type: ident, $lock_method: ident, $try_lock_method: ident $(, $opt:ident)*) => {
+        pub(crate) struct PoolLock<M: Manager> {
+            inner: $lock_type<PoolInner<M>>,
+        }
+
+        impl<M: Manager> PoolLock<M> {
+            pub(crate) fn new(pool_size: usize) -> Self {
+                PoolLock {
+                    inner: $lock_type::new(PoolInner::new(pool_size)),
+                }
+            }
+
+            #[inline]
+            pub(crate) fn _lock(&self) -> $guard_type<'_, PoolInner<M>> {
+                self.inner.$lock_method()$(.$opt())*
+            }
+
+            #[inline]
+            pub(crate) fn _try_lock(&self) -> Option<$guard_type<'_, PoolInner<M>>> {
+                self.inner.$try_lock_method().ok()
+            }
+        }
+
+        impl<'re, M: Manager> PoolLockFuture<'re, M> {
+            #[inline]
+            fn poll_pool_ref(
+                &mut self,
+                inner: &mut $guard_type<'re, PoolInner<M>>,
+            ) -> Poll<PoolRef<'re, M>> {
+                match inner.conn.pop_front() {
+                    Some(conn) => {
+                        self.acquired = true;
+                        Poll::Ready(PoolRef::new(conn, self.shared_pool))
+                    }
+                    None => Poll::Pending,
+                }
+            }
+
+            #[inline]
+            fn spawn_idle_conn(&self, inner: &mut $guard_type<'_, PoolInner<M>>) {
+                let shared = self.shared_pool;
+
+                let builder = shared.get_builder();
+
+                if inner.total() < builder.get_max_size() {
+                    let marker = inner.marker;
+                    let shared_clone = shared.clone();
+                    shared.spawn(async move {
+                        let _ = shared_clone.add_idle_conn(marker).await;
+                    });
+                    inner.incr_pending(1);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "no-send"))]
+pool_lock!(Mutex, MutexGuard, lock, try_lock, unwrap);
+
+#[cfg(feature = "no-send")]
+pool_lock!(RefCell, RefMut, borrow_mut, try_borrow_mut);
+
 impl<'re, M: Manager> Future for PoolLockFuture<'re, M> {
     type Output = PoolRef<'re, M>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut inner = self.pool_lock.inner.lock().unwrap();
+        // we return pending status directly if the pool is in pausing state.
+        if !self.shared_pool.is_running() {
+            return Poll::Pending;
+        }
 
-        let is_running = self.shared_pool.is_running();
+        let mut inner = self.pool_lock._lock();
 
         // poll a PoolRef and use the result to mutate PoolLockFuture state as well as PoolInner state.
-        let poll = self.poll_pool_ref(&mut inner, is_running);
+        let poll = self.poll_pool_ref(&mut inner);
 
         // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
         match self.wait_key {
@@ -352,9 +363,7 @@ impl<'re, M: Manager> Future for PoolLockFuture<'re, M> {
                     self.wait_key = None;
                 } else {
                     // if we can't get a PoolRef then we spawn a new connection if we have not hit the max pool size.
-                    if is_running {
-                        self.spawn_idle_conn(&mut inner);
-                    }
+                    self.spawn_idle_conn(&mut inner);
 
                     // if we are woken and have no key in waiters then we should not be in queue anymore.
                     let opt = unsafe { inner.waiters.get(wait_key) };
@@ -367,9 +376,7 @@ impl<'re, M: Manager> Future for PoolLockFuture<'re, M> {
             None => {
                 if poll.is_pending() {
                     // if we can't get a PoolRef then we spawn a new connection if we have not hit the max pool size.
-                    if is_running {
-                        self.spawn_idle_conn(&mut inner);
-                    }
+                    self.spawn_idle_conn(&mut inner);
 
                     let waker = cx.waker().clone();
                     let wait_key = inner.waiters.insert(Some(waker));
@@ -382,8 +389,10 @@ impl<'re, M: Manager> Future for PoolLockFuture<'re, M> {
     }
 }
 
+#[cfg(not(feature = "no-send"))]
 unsafe impl<M: Manager + Send> Send for PoolLock<M> {}
 
+#[cfg(not(feature = "no-send"))]
 unsafe impl<M: Manager + Send> Sync for PoolLock<M> {}
 
 pub struct State {

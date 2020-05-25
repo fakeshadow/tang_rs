@@ -106,7 +106,7 @@
 //!     }
 //!     drop(tx);
 //!
-//!     while let Some(_connection) = rx.recv().await {
+//!     while let Ok(_connection) = rx.recv().await {
 //!         // We just wait until all connections are pulled out once
 //!     }
 //! }

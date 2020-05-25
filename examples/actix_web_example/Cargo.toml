@@ -32,6 +32,12 @@ default-features = false
 [dependencies.serde_derive]
 version = "1.0.101"
 
+[dependencies.tang-rs]
+path = "../../"
+
+[dependencies.tokio]
+version = "0.2.20"
+
 [dependencies.tokio-postgres]
 version = "0.5.3"
 

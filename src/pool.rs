@@ -2,10 +2,11 @@ use std::fmt;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+#[cfg(feature = "no-send")]
+use std::rc::{Rc as WrapPointer, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(feature = "no-send"))]
+use std::sync::{Arc as WrapPointer, Weak};
 use std::time::Instant;
 
 use crate::builder::Builder;
@@ -68,14 +69,23 @@ impl<M: Manager> From<IdleConn<M>> for Conn<M> {
     }
 }
 
-pub struct ManagedPool<M: Manager + Send> {
+pub struct ManagedPool<M: Manager> {
     builder: Builder,
     manager: M,
     running: AtomicBool,
     pool_lock: PoolLock<M>,
 }
 
-impl<M: Manager + Send> ManagedPool<M> {
+impl<M: Manager> ManagedPool<M> {
+    fn new(builder: Builder, manager: M, size: usize) -> Self {
+        Self {
+            builder,
+            manager,
+            running: AtomicBool::new(true),
+            pool_lock: PoolLock::new(size),
+        }
+    }
+
     // Recursive if the connection is broken when `Builder.always_check == true`. We exit with at most 3 retries.
     fn get_conn<'a>(
         &'a self,
@@ -181,10 +191,18 @@ impl<M: Manager + Send> ManagedPool<M> {
         self.running.load(Ordering::Acquire)
     }
 
-    // ToDo: we should figure a way to handle failed spawn.
+    #[cfg(not(feature = "no-send"))]
     pub(crate) fn spawn<Fut>(&self, fut: Fut)
     where
         Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.manager.spawn(fut);
+    }
+
+    #[cfg(feature = "no-send")]
+    pub(crate) fn spawn<Fut>(&self, fut: Fut)
+    where
+        Fut: Future<Output = ()> + 'static,
     {
         self.manager.spawn(fut);
     }
@@ -222,38 +240,34 @@ impl<M: Manager + Send> ManagedPool<M> {
     }
 }
 
-pub type SharedManagedPool<M> = Arc<ManagedPool<M>>;
+pub type SharedManagedPool<M> = WrapPointer<ManagedPool<M>>;
+pub type WeakSharedManagedPool<M> = Weak<ManagedPool<M>>;
 
-pub struct Pool<M: Manager + Send>(SharedManagedPool<M>);
+pub struct Pool<M: Manager>(SharedManagedPool<M>);
 
-impl<M: Manager + Send> Clone for Pool<M> {
+impl<M: Manager> Clone for Pool<M> {
     fn clone(&self) -> Self {
         Pool(self.0.clone())
     }
 }
 
-impl<M: Manager + Send> fmt::Debug for Pool<M> {
+impl<M: Manager> fmt::Debug for Pool<M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_fmt(format_args!("Pool({:p})", self.0))
     }
 }
 
-impl<M: Manager + Send> Drop for Pool<M> {
+impl<M: Manager> Drop for Pool<M> {
     fn drop(&mut self) {
         self.0.manager.on_stop();
     }
 }
 
-impl<M: Manager + Send> Pool<M> {
+impl<M: Manager> Pool<M> {
     pub(crate) fn new(builder: Builder, manager: M) -> Self {
         let size = builder.get_max_size();
-
-        Pool(Arc::new(ManagedPool {
-            builder,
-            manager,
-            running: AtomicBool::new(true),
-            pool_lock: PoolLock::new(size),
-        }))
+        let pool = ManagedPool::new(builder, manager, size);
+        Pool(WrapPointer::new(pool))
     }
 
     /// manually initialize pool. this is usually called when the `Pool` is built with `build_uninitialized`
@@ -327,6 +341,13 @@ impl<M: Manager + Send> Pool<M> {
         shared_pool.get_conn(shared_pool, 0).await
     }
 
+    /// Return a `PoolRefOwned` contains a weak smart pointer of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
+    ///
+    /// You can move `PoolRefOwned` to async blocks and across await point. But the performance is considerably worse than `Pool::get`.
+    pub async fn get_owned(&self) -> Result<PoolRefOwned<M>, M::Error> {
+        self.get().await.map(Into::into)
+    }
+
     /// Run the pool with a closure.
     pub async fn run<T, E, F>(&self, f: F) -> Result<T, E>
     where
@@ -335,7 +356,7 @@ impl<M: Manager + Send> Pool<M> {
         T: Send + 'static,
     {
         let mut pool_ref = self.get().await?;
-        f(&mut *pool_ref).await
+        Box::pin(f(&mut *pool_ref)).await
     }
 
     /// Clear the pool.
@@ -372,15 +393,21 @@ impl<M: Manager + Send> Pool<M> {
     }
 }
 
-pub struct PoolRef<'a, M: Manager + Send> {
+pub struct PoolRef<'a, M: Manager> {
     conn: Option<Conn<M>>,
-    shared_pool: &'a Arc<ManagedPool<M>>,
+    shared_pool: &'a SharedManagedPool<M>,
     // marker is only used to store the marker of Conn<M> if it's been taken from pool
     marker: Option<usize>,
 }
 
-impl<'a, M: Manager + Send> PoolRef<'a, M> {
-    pub(crate) fn new(conn: IdleConn<M>, shared_pool: &'a Arc<ManagedPool<M>>) -> Self {
+pub struct PoolRefOwned<M: Manager> {
+    conn: Option<Conn<M>>,
+    shared_pool: WeakSharedManagedPool<M>,
+    marker: Option<usize>,
+}
+
+impl<'a, M: Manager> PoolRef<'a, M> {
+    pub(crate) fn new(conn: IdleConn<M>, shared_pool: &'a SharedManagedPool<M>) -> Self {
         PoolRef {
             conn: Some(conn.into()),
             shared_pool,
@@ -389,7 +416,17 @@ impl<'a, M: Manager + Send> PoolRef<'a, M> {
     }
 }
 
-impl<M: Manager + Send> Deref for PoolRef<'_, M> {
+impl<M: Manager> From<PoolRef<'_, M>> for PoolRefOwned<M> {
+    fn from(mut pool: PoolRef<'_, M>) -> Self {
+        Self {
+            conn: pool.conn.take(),
+            shared_pool: WrapPointer::downgrade(pool.shared_pool),
+            marker: pool.marker,
+        }
+    }
+}
+
+impl<M: Manager> Deref for PoolRef<'_, M> {
     type Target = M::Connection;
 
     fn deref(&self) -> &Self::Target {
@@ -401,7 +438,7 @@ impl<M: Manager + Send> Deref for PoolRef<'_, M> {
     }
 }
 
-impl<M: Manager + Send> DerefMut for PoolRef<'_, M> {
+impl<M: Manager> DerefMut for PoolRef<'_, M> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self
             .conn
@@ -411,7 +448,29 @@ impl<M: Manager + Send> DerefMut for PoolRef<'_, M> {
     }
 }
 
-impl<M: Manager + Send> PoolRef<'_, M> {
+impl<M: Manager> Deref for PoolRefOwned<M> {
+    type Target = M::Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self
+            .conn
+            .as_ref()
+            .expect("Connection has already been taken")
+            .conn
+    }
+}
+
+impl<M: Manager> DerefMut for PoolRefOwned<M> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self
+            .conn
+            .as_mut()
+            .expect("Connection has already been taken")
+            .conn
+    }
+}
+
+impl<M: Manager> PoolRef<'_, M> {
     pub fn get_manager(&self) -> &M {
         &self.shared_pool.manager
     }
@@ -434,7 +493,7 @@ impl<M: Manager + Send> PoolRef<'_, M> {
     /// operation will fail if the pool is already in full capacity(no error will return and this connection will be dropped silently)
     pub fn push_conn(&mut self, conn: M::Connection) {
         // if the PoolRef have a marker then the conn must have been taken.
-        // otherwise we give the marker of sle.conn to the newly generated one.
+        // otherwise we give the marker of self.conn to the newly generated one.
         let marker = match self.marker {
             Some(marker) => marker,
             None => self.conn.as_ref().map(|c| c.get_marker()).unwrap(),
@@ -452,45 +511,63 @@ impl<M: Manager + Send> PoolRef<'_, M> {
     }
 }
 
-impl<M: Manager + Send> Drop for PoolRef<'_, M> {
+impl<M: Manager> Drop for PoolRef<'_, M> {
     #[inline]
     fn drop(&mut self) {
-        let shared_pool = self.shared_pool;
+        self.shared_pool.drop_pool_ref(&mut self.conn, self.marker);
+    }
+}
 
-        if !shared_pool.is_running() {
+impl<M: Manager> Drop for PoolRefOwned<M> {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(shared_pool) = self.shared_pool.upgrade() {
+            shared_pool.drop_pool_ref(&mut self.conn, self.marker);
+        }
+    }
+}
+
+trait DropAndSpawn<M: Manager> {
+    fn drop_pool_ref(&self, conn: &mut Option<Conn<M>>, marker: Option<usize>);
+
+    fn spawn_drop(&self, marker: usize);
+}
+
+impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
+    fn drop_pool_ref(&self, conn: &mut Option<Conn<M>>, marker: Option<usize>) {
+        if !self.is_running() {
             // marker here doesn't matter as should_spawn_new would reject new connection generation
-            shared_pool.drop_conn(0, false);
+            self.drop_conn(0, false);
             return;
         }
 
-        let mut conn = match self.conn.take() {
+        let mut conn = match conn.take() {
             Some(conn) => conn,
             None => {
                 // if the connection is taken then self.marker must be Some(usize)
-                spawn_drop(self.marker.unwrap(), shared_pool);
+                self.spawn_drop(marker.unwrap());
                 return;
             }
         };
 
-        let is_closed = shared_pool.manager.is_closed(&mut conn.conn);
+        let is_closed = self.manager.is_closed(&mut conn.conn);
         if is_closed {
-            spawn_drop(conn.marker, shared_pool);
+            self.spawn_drop(conn.marker);
         } else {
-            shared_pool
-                .pool_lock
-                .put_back(conn.into(), shared_pool.builder.get_max_size());
+            self.pool_lock
+                .put_back(conn.into(), self.builder.get_max_size());
         };
     }
-}
 
-// helper function to spawn drop connection and spawn new ones if needed.
-// Conn<M> should be dropped in place where spawn_drop() is used.
-// ToDo: Will get unsolvable pending if the spawn is panic;
-fn spawn_drop<M: Manager + Send>(marker: usize, shared_pool: &Arc<ManagedPool<M>>) {
-    if let Some(pending) = shared_pool.drop_conn(marker, true) {
-        let shared_clone = shared_pool.clone();
-        shared_pool.spawn(async move {
-            let _ = shared_clone.replenish_idle_conn(pending, marker).await;
-        });
+    // helper function to spawn drop connection and spawn new ones if needed.
+    // Conn<M> should be dropped in place where spawn_drop() is used.
+    // ToDo: Will get unsolvable pending if the spawn is panic;
+    fn spawn_drop(&self, marker: usize) {
+        if let Some(pending) = self.drop_conn(marker, true) {
+            let shared_clone = self.clone();
+            self.spawn(async move {
+                let _ = shared_clone.replenish_idle_conn(pending, marker).await;
+            });
+        }
     }
 }

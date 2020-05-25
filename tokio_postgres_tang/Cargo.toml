@@ -6,8 +6,9 @@ edition = "2018"
 
 [features]
 default = ["with-tokio"]
-with-tokio = ["tokio/rt-threaded", "tokio/time", "tokio-postgres/runtime"]
-with-async-std = ["async-postgres", "async-std/unstable", "tokio-postgres"]
+with-tokio = ["tang-rs", "tokio/rt-threaded", "tokio/time", "tokio-postgres/runtime"]
+with-async-std = ["tang-rs", "async-postgres", "async-std/unstable", "tokio-postgres"]
+with-ntex = [ "tang-rs/no-send", "tokio/time", "tokio/rt-util", "tokio-postgres/runtime"]
 
 [dependencies.async-postgres]
 version = "0.5.0"
@@ -25,6 +26,7 @@ default-features = false
 
 [dependencies.tang-rs]
 path = "../"
+optional = true
 
 [dependencies.tokio-postgres]
 version = "0.5.3"

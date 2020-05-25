@@ -1,13 +1,14 @@
-// basically the same as actix-web example.
+// Use a single thread based connection pool.
+// Every thread have one pool. Every pool has it's own logic and background tasks.
 
 #[macro_use]
 extern crate serde_derive;
 
 use futures_util::TryStreamExt;
 use ntex::web::{
-    self, error::ErrorInternalServerError, types::Data, App, Error, HttpResponse, HttpServer,
+    self, error::ErrorInternalServerError, types::Data, App, Error, HttpRequest, HttpResponse,
+    HttpServer,
 };
-use once_cell::sync::Lazy;
 use redis_tang::RedisManager;
 use tokio_postgres::{
     types::{ToSql, Type},
@@ -15,50 +16,43 @@ use tokio_postgres::{
 };
 use tokio_postgres_tang::{Builder, Pool, PostgresManager};
 
-static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
-    let db_url = "postgres://postgres:123@localhost/test";
-
-    let mgr = PostgresManager::new_from_stringlike(db_url, NoTls)
-        .expect("can't make postgres manager")
-        .prepare_statement(
-            "get_topics",
-            "SELECT * FROM topics WHERE id=ANY($1)",
-            &[Type::OID_ARRAY],
-        )
-        .prepare_statement("get_users", "SELECT * FROM posts WHERE id=ANY($1)", &[]);
-
-    Builder::new()
-        .always_check(false)
-        .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
-        .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
-        .reaper_rate(std::time::Duration::from_secs(5))
-        .min_idle(1)
-        .max_size(24)
-        .build_uninitialized(mgr)
-        .unwrap_or_else(|e| panic!("{:?}", e))
-});
-
 #[ntex::main]
 async fn main() -> std::io::Result<()> {
-    POOL.init()
-        .await
-        .expect("Failed to initialize tokio-postgres pool");
-
-    let mgr = RedisManager::new("redis://127.0.0.1");
-    let pool_redis = Builder::new()
-        .always_check(false)
-        .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
-        .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
-        .reaper_rate(std::time::Duration::from_secs(5))
-        .min_idle(1)
-        .max_size(24)
-        .build(mgr)
-        .await
-        .expect("Failed to initialize redis pool");
-
     HttpServer::new(move || {
         App::new()
-            .data(pool_redis.clone())
+            // use data_factory to build pool for every thread
+            .data_factory(|| {
+                let db_url = "postgres://postgres:123@localhost/test";
+                let mgr = PostgresManager::new_from_stringlike(db_url, NoTls)
+                    .expect("can't make postgres manager")
+                    .prepare_statement(
+                        "get_topics",
+                        "SELECT * FROM topics WHERE id=ANY($1)",
+                        &[Type::OID_ARRAY],
+                    )
+                    .prepare_statement("get_users", "SELECT * FROM posts WHERE id=ANY($1)", &[]);
+
+                Builder::new()
+                    .always_check(false)
+                    .idle_timeout(None)
+                    .max_lifetime(None)
+                    // we build pool for every thread so the total connections would be threads * 3.
+                    // (Make too many connections would result in very little performance gain and a relative heavy background tasks for pool scheduler tasks)
+                    .min_idle(1)
+                    .max_size(3)
+                    .build(mgr)
+            })
+            .data_factory(|| {
+                let mgr = RedisManager::new("redis://127.0.0.1");
+                Builder::new()
+                    .always_check(false)
+                    .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
+                    .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+                    .reaper_rate(std::time::Duration::from_secs(5))
+                    .min_idle(2)
+                    .max_size(2)
+                    .build(mgr)
+            })
             .service(web::resource("/test").route(web::get().to(test)))
             .service(web::resource("/test/redis").route(web::get().to(test_redis)))
     })
@@ -67,12 +61,18 @@ async fn main() -> std::io::Result<()> {
     .await
 }
 
-async fn test() -> Result<HttpResponse, Error> {
+async fn test(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let pool = req
+        .app_data::<Data<Pool<PostgresManager<NoTls>>>>()
+        .unwrap();
+
+    println!("pool state is {:#?}", pool.state());
+
     let ids = vec![
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];
 
-    let pool_ref = POOL
+    let pool_ref = pool
         .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
@@ -122,8 +122,10 @@ async fn test() -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().json(&t))
 }
 
-async fn test_redis(pool: Data<Pool<RedisManager>>) -> Result<HttpResponse, Error> {
-    let mut client = pool
+async fn test_redis(req: HttpRequest) -> Result<HttpResponse, Error> {
+    let mut client = req
+        .app_data::<Data<Pool<RedisManager>>>()
+        .unwrap()
         .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?
