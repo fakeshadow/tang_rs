@@ -6,8 +6,7 @@ extern crate serde_derive;
 
 use futures_util::TryStreamExt;
 use ntex::web::{
-    self, error::ErrorInternalServerError, types::Data, App, Error, HttpRequest, HttpResponse,
-    HttpServer,
+    self, error::ErrorInternalServerError, types::Data, App, Error, HttpResponse, HttpServer,
 };
 use redis_tang::RedisManager;
 use tokio_postgres::{
@@ -61,12 +60,8 @@ async fn main() -> std::io::Result<()> {
     .await
 }
 
-async fn test(req: HttpRequest) -> Result<HttpResponse, Error> {
-    let pool = req
-        .app_data::<Data<Pool<PostgresManager<NoTls>>>>()
-        .unwrap();
-
-    println!("pool state is {:#?}", pool.state());
+async fn test(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResponse, Error> {
+    // println!("pool state is {:#?}", pool.state());
 
     let ids = vec![
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
@@ -122,10 +117,8 @@ async fn test(req: HttpRequest) -> Result<HttpResponse, Error> {
     Ok(HttpResponse::Ok().json(&t))
 }
 
-async fn test_redis(req: HttpRequest) -> Result<HttpResponse, Error> {
-    let mut client = req
-        .app_data::<Data<Pool<RedisManager>>>()
-        .unwrap()
+async fn test_redis(pool: Data<Pool<RedisManager>>) -> Result<HttpResponse, Error> {
+    let mut client = pool
         .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?

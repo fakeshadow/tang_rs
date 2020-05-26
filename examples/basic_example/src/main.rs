@@ -156,7 +156,7 @@ async fn main() {
     }
     drop(tx);
 
-    while let Some(_conn) = rx.recv().await {
+    while let Ok(_conn) = rx.recv().await {
         // We just wait until all connections are pulled out once
     }
     let duration = std::time::Instant::now().duration_since(now);

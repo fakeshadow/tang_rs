@@ -20,7 +20,7 @@ with-async-std = ["tang-rs", "async-std/unstable", "redis/async-std-comp"]
 with-ntex = ["tang-rs/no-send", "tokio/time", "tokio/rt-util", "redis/tokio-rt-core"]
 
 [dependencies.async-std]
-version = "1.5.0"
+version = "1.6.0"
 default-features = false
 optional = true
 

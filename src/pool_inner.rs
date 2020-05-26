@@ -117,6 +117,7 @@ impl<M: Manager> PoolLock<M> {
 
     // add pending directly to pool inner if we try to spawn new connections.
     // and return the new pending count as option to notify the Pool to replenish connections
+    #[cfg(not(feature = "no-send"))]
     pub(crate) fn decr_spawned(
         &self,
         marker: usize,
@@ -126,10 +127,26 @@ impl<M: Manager> PoolLock<M> {
         let mut inner = self._lock();
 
         inner.decr_spawned(1);
-
         let total = inner.total();
 
         if total < min_idle && should_spawn_new && marker == inner.marker {
+            let pending_new = min_idle - total;
+            inner.incr_pending(pending_new);
+            Some(pending_new)
+        } else {
+            None
+        }
+    }
+
+    // ToDo: currently we don't enable clear and pause function for single thread pool.
+    #[cfg(feature = "no-send")]
+    pub(crate) fn decr_spawned(&self, min_idle: usize) -> Option<usize> {
+        let mut inner = self._lock();
+
+        inner.decr_spawned(1);
+        let total = inner.total();
+
+        if total < min_idle {
             let pending_new = min_idle - total;
             inner.incr_pending(pending_new);
             Some(pending_new)
@@ -196,7 +213,15 @@ impl<M: Manager> PoolLock<M> {
     #[inline]
     pub(crate) fn put_back(&self, conn: IdleConn<M>, max_size: usize) {
         let mut inner = self._lock();
-        if inner.spawned > max_size || inner.marker != conn.get_marker() {
+
+        #[cfg(not(feature = "no-send"))]
+        let condition = inner.spawned > max_size || inner.marker != conn.get_marker();
+
+        // ToDo: currently we don't enable clear function for single thread pool.
+        #[cfg(feature = "no-send")]
+        let condition = inner.spawned > max_size;
+
+        if condition {
             inner.decr_spawned(1);
         } else {
             inner.put_back(conn);
@@ -210,7 +235,15 @@ impl<M: Manager> PoolLock<M> {
         let mut inner = self._lock();
 
         inner.decr_pending(1);
-        if inner.spawned < max_size && inner.marker == conn.get_marker() {
+
+        #[cfg(not(feature = "no-send"))]
+        let condition = inner.spawned < max_size && inner.marker == conn.get_marker();
+
+        // ToDo: currently we don't enable clear function for single thread pool.
+        #[cfg(feature = "no-send")]
+        let condition = inner.spawned < max_size;
+
+        if condition {
             inner.put_back(conn);
             inner.incr_spawned(1);
             let opt = inner.waiters.wake_one_weak();
@@ -345,6 +378,8 @@ impl<'re, M: Manager> Future for PoolLockFuture<'re, M> {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // we return pending status directly if the pool is in pausing state.
+        // ToDo: currently we don't enable pause function for single thread pool.
+        #[cfg(not(feature = "no-send"))]
         if !self.shared_pool.is_running() {
             return Poll::Pending;
         }

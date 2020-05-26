@@ -43,6 +43,7 @@ impl<M: Manager> IdleConn<M> {
         }
     }
 
+    #[cfg(not(feature = "no-send"))]
     #[inline]
     pub(crate) fn get_marker(&self) -> usize {
         self.conn.marker
@@ -123,11 +124,19 @@ impl<M: Manager> ManagedPool<M> {
         })
     }
 
+    #[cfg(not(feature = "no-send"))]
     fn drop_conn(&self, marker: usize, should_spawn_new: bool) -> Option<usize> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
         self.pool_lock
             .decr_spawned(marker, self.builder.min_idle, should_spawn_new)
+    }
+
+    #[cfg(feature = "no-send")]
+    fn drop_conn(&self) -> Option<usize> {
+        //  We might need to spin up more connections to maintain the idle limit.
+        //  e.g. if we hit connection lifetime limits
+        self.pool_lock.decr_spawned(self.builder.min_idle)
     }
 
     pub(crate) async fn add_idle_conn(&self, marker: usize) -> Result<(), M::Error> {
@@ -535,6 +544,8 @@ trait DropAndSpawn<M: Manager> {
 
 impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
     fn drop_pool_ref(&self, conn: &mut Option<Conn<M>>, marker: Option<usize>) {
+        // ToDo: currently we don't enable pause function for single thread pool.
+        #[cfg(not(feature = "no-send"))]
         if !self.is_running() {
             // marker here doesn't matter as should_spawn_new would reject new connection generation
             self.drop_conn(0, false);
@@ -563,7 +574,12 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
     // Conn<M> should be dropped in place where spawn_drop() is used.
     // ToDo: Will get unsolvable pending if the spawn is panic;
     fn spawn_drop(&self, marker: usize) {
-        if let Some(pending) = self.drop_conn(marker, true) {
+        #[cfg(not(feature = "no-send"))]
+        let opt = self.drop_conn(marker, true);
+        #[cfg(feature = "no-send")]
+        let opt = self.drop_conn();
+
+        if let Some(pending) = opt {
             let shared_clone = self.clone();
             self.spawn(async move {
                 let _ = shared_clone.replenish_idle_conn(pending, marker).await;

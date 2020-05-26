@@ -15,7 +15,6 @@ pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(feature = "no-send")]
 pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
-#[cfg(not(feature = "no-send"))]
 pub trait Manager: Sized + Send + Sync + 'static {
     type Connection: Send + 'static;
     type Error: Send + Debug + From<Self::TimeoutError> + 'static;
@@ -40,9 +39,15 @@ pub trait Manager: Sized + Send + Sync + 'static {
     /// spawn futures on your executor
     ///
     /// The future have to be `Send + 'static` and the return type(e.g. JoinHandler) of your executor will be ignored.
+    #[cfg(not(feature = "no-send"))]
     fn spawn<Fut>(&self, fut: Fut)
     where
         Fut: Future<Output = ()> + Send + 'static;
+
+    #[cfg(feature = "no-send")]
+    fn spawn<Fut>(&self, fut: Fut)
+    where
+        Fut: Future<Output = ()> + 'static;
 
     /// Used to cancel futures and return `Manager::TimeoutError`.
     ///
@@ -51,6 +56,7 @@ pub trait Manager: Sized + Send + Sync + 'static {
     /// By default we ignore the timeout and await on the future directly.
     ///
     /// Override this method if you actually want to handle the timeout.
+    #[cfg(not(feature = "no-send"))]
     fn timeout<'fu, Fut>(
         &self,
         fut: Fut,
@@ -65,49 +71,7 @@ pub trait Manager: Sized + Send + Sync + 'static {
         })
     }
 
-    /// This method will be called when `Pool<Manager>::init()` executes.
-    fn on_start(&self, _shared_pool: &SharedManagedPool<Self>) {}
-
-    /// This method will be called when `Pool<Manager>` is dropping
-    fn on_stop(&self) {}
-}
-
-#[cfg(feature = "no-send")]
-pub trait Manager: Sized + 'static {
-    type Connection: Send + 'static;
-    type Error: Send + Debug + From<Self::TimeoutError> + 'static;
-    type TimeoutError: Send + Debug + 'static;
-
-    /// generate a new connection and put it into pool.
-    fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>>;
-
-    /// check if a connection is valid.
-    ///
-    /// *. Only called when `Builder.always_check == true`
-    fn is_valid<'a>(
-        &'a self,
-        conn: &'a mut Self::Connection,
-    ) -> ManagerFuture<'a, Result<(), Self::Error>>;
-
-    /// check if a connection is closed.
-    ///
-    /// This happens before a connection put back to pool.
-    fn is_closed(&self, conn: &mut Self::Connection) -> bool;
-
-    /// spawn futures on your executor
-    ///
-    /// The future have to be `Send + 'static` and the return type(e.g. JoinHandler) of your executor will be ignored.
-    fn spawn<Fut>(&self, fut: Fut)
-    where
-        Fut: Future<Output = ()> + 'static;
-
-    /// Used to cancel futures and return `Manager::TimeoutError`.
-    ///
-    /// The duration is determined by `Builder.wait_timeout` and `Builder.connection_timeout`
-    ///
-    /// By default we ignore the timeout and await on the future directly.
-    ///
-    /// Override this method if you actually want to handle the timeout.
+    #[cfg(feature = "no-send")]
     fn timeout<'fu, Fut>(
         &self,
         fut: Fut,
