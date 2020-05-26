@@ -3,6 +3,7 @@ use std::cell::{RefCell, RefMut};
 use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 #[cfg(not(feature = "no-send"))]
@@ -12,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::{
     manager::Manager,
-    pool::{IdleConn, PoolRef},
+    pool::{IdleConn, PoolRefBehavior},
     util::linked_list::WakerList,
     SharedManagedPool,
 };
@@ -103,15 +104,16 @@ impl<M: Manager> PoolInner<M> {
 
 impl<M: Manager> PoolLock<M> {
     #[inline]
-    pub(crate) fn lock<'a>(
+    pub(crate) fn lock<'a, R>(
         &'a self,
         shared_pool: &'a SharedManagedPool<M>,
-    ) -> PoolLockFuture<'a, M> {
+    ) -> PoolLockFuture<'a, M, R> {
         PoolLockFuture {
             shared_pool,
             pool_lock: self,
             wait_key: None,
             acquired: false,
+            _r: PhantomData,
         }
     }
 
@@ -278,14 +280,15 @@ impl<M: Manager> PoolLock<M> {
 
 // `PoolLockFuture` return a future of `PoolRef`. In the `Future` we pass it's `Waker` to `PoolLock`.
 // Then when a `IdleConn` is returned to pool we lock the `PoolLock` and wake the `Wakers` inside it to notify other `PoolLockFuture` it's time to continue.
-pub(crate) struct PoolLockFuture<'a, M: Manager> {
+pub(crate) struct PoolLockFuture<'a, M: Manager, R> {
     shared_pool: &'a SharedManagedPool<M>,
     pool_lock: &'a PoolLock<M>,
     wait_key: Option<NonZeroUsize>,
     acquired: bool,
+    _r: PhantomData<R>,
 }
 
-impl<M: Manager> Drop for PoolLockFuture<'_, M> {
+impl<M: Manager, R> Drop for PoolLockFuture<'_, M, R> {
     #[inline]
     fn drop(&mut self) {
         if let Some(wait_key) = self.wait_key {
@@ -294,7 +297,7 @@ impl<M: Manager> Drop for PoolLockFuture<'_, M> {
     }
 }
 
-impl<'re, M: Manager> PoolLockFuture<'re, M> {
+impl<M: Manager, R> PoolLockFuture<'_, M, R> {
     #[cold]
     fn wake_cold(&self, wait_key: NonZeroUsize) {
         let mut inner = self.pool_lock._lock();
@@ -312,13 +315,13 @@ impl<'re, M: Manager> PoolLockFuture<'re, M> {
 macro_rules! pool_lock {
     ($lock_type: ident, $guard_type: ident, $lock_method: ident, $try_lock_method: ident $(, $opt:ident)*) => {
         pub(crate) struct PoolLock<M: Manager> {
-            inner: $lock_type<PoolInner<M>>,
+            inner: $lock_type<PoolInner<M>>
         }
 
         impl<M: Manager> PoolLock<M> {
             pub(crate) fn new(pool_size: usize) -> Self {
                 PoolLock {
-                    inner: $lock_type::new(PoolInner::new(pool_size)),
+                    inner: $lock_type::new(PoolInner::new(pool_size))
                 }
             }
 
@@ -333,16 +336,19 @@ macro_rules! pool_lock {
             }
         }
 
-        impl<'re, M: Manager> PoolLockFuture<'re, M> {
+        impl<'re, M, R> PoolLockFuture<'re, M, R>
+        where M: Manager,
+              R: PoolRefBehavior<'re, M>
+        {
             #[inline]
             fn poll_pool_ref(
                 &mut self,
                 inner: &mut $guard_type<'re, PoolInner<M>>,
-            ) -> Poll<PoolRef<'re, M>> {
+            ) -> Poll<R> {
                 match inner.conn.pop_front() {
                     Some(conn) => {
                         self.acquired = true;
-                        Poll::Ready(PoolRef::new(conn, self.shared_pool))
+                        Poll::Ready(R::from_idle(conn, self.shared_pool))
                     }
                     None => Poll::Pending,
                 }
@@ -373,8 +379,12 @@ pool_lock!(Mutex, MutexGuard, lock, try_lock, unwrap);
 #[cfg(feature = "no-send")]
 pool_lock!(RefCell, RefMut, borrow_mut, try_borrow_mut);
 
-impl<'re, M: Manager> Future for PoolLockFuture<'re, M> {
-    type Output = PoolRef<'re, M>;
+impl<'re, M, R> Future for PoolLockFuture<'re, M, R>
+where
+    M: Manager,
+    R: PoolRefBehavior<'re, M> + Unpin,
+{
+    type Output = R;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // we return pending status directly if the pool is in pausing state.

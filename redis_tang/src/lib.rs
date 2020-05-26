@@ -15,7 +15,7 @@ use tokio::time::{
     timeout, Elapsed as TimeoutError, {interval, Instant, Interval},
 };
 
-pub use tang_rs::{Builder, Pool, PoolRef};
+pub use tang_rs::{Builder, Pool, PoolRef, PoolRefOwned};
 use tang_rs::{
     GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping, SharedManagedPool,
 };

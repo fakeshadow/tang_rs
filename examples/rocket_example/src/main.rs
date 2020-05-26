@@ -7,6 +7,7 @@ extern crate serde_derive;
 
 use std::convert::From;
 
+use futures_util::TryStreamExt;
 use rocket::{
     response::{content, Debug},
     State,
@@ -16,7 +17,6 @@ use tokio_postgres::{
     Row,
 };
 
-use futures_util::TryStreamExt;
 use redis_tang::{RedisManager, RedisPoolError};
 use tokio_postgres_tang::{Builder, Pool, PostgresManager, PostgresPoolError};
 

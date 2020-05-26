@@ -8,11 +8,12 @@ use futures_util::TryStreamExt;
 use ntex::web::{
     self, error::ErrorInternalServerError, types::Data, App, Error, HttpResponse, HttpServer,
 };
-use redis_tang::RedisManager;
 use tokio_postgres::{
     types::{ToSql, Type},
     NoTls, Row,
 };
+
+use redis_tang::RedisManager;
 use tokio_postgres_tang::{Builder, Pool, PostgresManager};
 
 #[ntex::main]

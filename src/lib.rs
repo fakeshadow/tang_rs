@@ -114,7 +114,7 @@
 
 pub use builder::Builder;
 pub use manager::{GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping};
-pub use pool::{Pool, PoolRef, SharedManagedPool};
+pub use pool::{Pool, PoolRef, PoolRefOwned, SharedManagedPool};
 
 mod builder;
 mod manager;

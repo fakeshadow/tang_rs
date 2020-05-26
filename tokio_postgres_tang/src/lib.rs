@@ -70,8 +70,6 @@
 //!}
 //!```
 
-pub use tang_rs::{Builder, Pool, PoolRef};
-
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -81,10 +79,12 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use futures_util::{future::join_all, TryFutureExt};
+use tokio_postgres::Client;
+
+pub use tang_rs::{Builder, Pool, PoolRef, PoolRefOwned};
 use tang_rs::{
     GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping, SharedManagedPool,
 };
-use tokio_postgres::Client;
 #[cfg(feature = "with-async-std")]
 use {
     async_postgres::{
@@ -108,6 +108,7 @@ use {
         Config, Error, Socket, Statement,
     },
 };
+
 pub struct PostgresManager<Tls>
 where
     Tls: MakeTlsConnect<Socket>,

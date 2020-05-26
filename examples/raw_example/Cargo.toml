@@ -17,7 +17,7 @@ path = "../../redis_tang"
 path = "../../tokio_postgres_tang"
 
 [dependencies.tokio-postgres]
-version = "0.5.3"
+version = "0.5.4"
 
 [dependencies.tokio]
 version = "0.2.16"

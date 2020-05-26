@@ -16,7 +16,7 @@ pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 pub trait Manager: Sized + Send + Sync + 'static {
-    type Connection: Send + 'static;
+    type Connection: Send + Unpin + 'static;
     type Error: Send + Debug + From<Self::TimeoutError> + 'static;
     type TimeoutError: Send + Debug + 'static;
 

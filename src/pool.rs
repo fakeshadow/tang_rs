@@ -88,13 +88,57 @@ impl<M: Manager> ManagedPool<M> {
     }
 
     // Recursive if the connection is broken when `Builder.always_check == true`. We exit with at most 3 retries.
-    fn get_conn<'a>(
+    #[cfg(not(feature = "no-send"))]
+    fn get_conn<'a, R>(
         &'a self,
         shared_pool: &'a SharedManagedPool<M>,
         mut retry: u8,
-    ) -> ManagerFuture<Result<PoolRef<'a, M>, M::Error>> {
+    ) -> ManagerFuture<Result<R, M::Error>>
+    where
+        R: PoolRefBehavior<'a, M> + Send + Unpin,
+    {
         Box::pin(async move {
-            let fut = self.pool_lock.lock(shared_pool);
+            let fut = self.pool_lock.lock::<R>(shared_pool);
+            let timeout = self.builder.wait_timeout;
+
+            let mut pool_ref = self.manager.timeout(fut, timeout).await?;
+
+            if self.builder.always_check {
+                let result = self.check_conn(&mut *pool_ref).await;
+
+                match result {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        pool_ref.take_drop();
+                        return if retry == 3 {
+                            Err(e)
+                        } else {
+                            retry += 1;
+                            self.get_conn(shared_pool, retry).await
+                        };
+                    }
+                    Err(timeout) => {
+                        pool_ref.take_drop();
+                        return Err(timeout);
+                    }
+                }
+            };
+
+            Ok(pool_ref)
+        })
+    }
+
+    #[cfg(feature = "no-send")]
+    fn get_conn<'a, R>(
+        &'a self,
+        shared_pool: &'a SharedManagedPool<M>,
+        mut retry: u8,
+    ) -> ManagerFuture<Result<R, M::Error>>
+    where
+        R: PoolRefBehavior<'a, M> + Unpin,
+    {
+        Box::pin(async move {
+            let fut = self.pool_lock.lock::<R>(shared_pool);
             let timeout = self.builder.wait_timeout;
 
             let mut pool_ref = self.manager.timeout(fut, timeout).await?;
@@ -250,6 +294,7 @@ impl<M: Manager> ManagedPool<M> {
 }
 
 pub type SharedManagedPool<M> = WrapPointer<ManagedPool<M>>;
+
 pub type WeakSharedManagedPool<M> = Weak<ManagedPool<M>>;
 
 pub struct Pool<M: Manager>(SharedManagedPool<M>);
@@ -354,7 +399,9 @@ impl<M: Manager> Pool<M> {
     ///
     /// You can move `PoolRefOwned` to async blocks and across await point. But the performance is considerably worse than `Pool::get`.
     pub async fn get_owned(&self) -> Result<PoolRefOwned<M>, M::Error> {
-        self.get().await.map(Into::into)
+        let shared_pool = &self.0;
+
+        shared_pool.get_conn(shared_pool, 0).await
     }
 
     /// Run the pool with a closure.
@@ -415,23 +462,110 @@ pub struct PoolRefOwned<M: Manager> {
     marker: Option<usize>,
 }
 
-impl<'a, M: Manager> PoolRef<'a, M> {
-    pub(crate) fn new(conn: IdleConn<M>, shared_pool: &'a SharedManagedPool<M>) -> Self {
-        PoolRef {
+impl<'re, M: Manager> PoolRef<'re, M> {
+    /// get a mut reference of connection.
+    pub fn get_conn(&mut self) -> &mut M::Connection {
+        &mut *self
+    }
+
+    /// take the the ownership of connection from pool and it won't be pushed back to pool anymore.
+    pub fn take_conn(&mut self) -> Option<M::Connection> {
+        self.conn.take().map(|c| {
+            self.marker = Some(c.marker);
+            c.conn
+        })
+    }
+
+    /// manually push a connection to pool. We treat this connection as a new born one.
+    ///
+    /// operation will fail if the pool is already in full capacity(no error will return and this connection will be dropped silently)
+    pub fn push_conn(&mut self, conn: M::Connection) {
+        // if the PoolRef have a marker then the conn must have been taken.
+        // otherwise we give the marker of self.conn to the newly generated one.
+        let marker = match self.marker {
+            Some(marker) => marker,
+            None => self.conn.as_ref().map(|c| c.get_marker()).unwrap(),
+        };
+
+        self.conn = Some(Conn {
+            conn,
+            marker,
+            birth: Instant::now(),
+        });
+    }
+
+    pub fn get_manager(&self) -> &M {
+        &self.shared_pool.manager
+    }
+}
+
+impl<M: Manager> PoolRefOwned<M> {
+    /// get a mut reference of connection.
+    pub fn get_conn(&mut self) -> &mut M::Connection {
+        &mut *self
+    }
+
+    /// take the the ownership of connection from pool and it won't be pushed back to pool anymore.
+    pub fn take_conn(&mut self) -> Option<M::Connection> {
+        self.conn.take().map(|c| {
+            self.marker = Some(c.marker);
+            c.conn
+        })
+    }
+
+    /// manually push a connection to pool. We treat this connection as a new born one.
+    ///
+    /// operation will fail if the pool is already in full capacity(no error will return and this connection will be dropped silently)
+    pub fn push_conn(&mut self, conn: M::Connection) {
+        // if the PoolRef have a marker then the conn must have been taken.
+        // otherwise we give the marker of self.conn to the newly generated one.
+        let marker = match self.marker {
+            Some(marker) => marker,
+            None => self.conn.as_ref().map(|c| c.get_marker()).unwrap(),
+        };
+
+        self.conn = Some(Conn {
+            conn,
+            marker,
+            birth: Instant::now(),
+        });
+    }
+}
+
+pub(crate) trait PoolRefBehavior<'a, M: Manager>: Sized
+where
+    Self: DerefMut<Target = M::Connection>,
+{
+    fn from_idle(conn: IdleConn<M>, shared_pool: &'a SharedManagedPool<M>) -> Self;
+
+    fn take_drop(self) {}
+}
+
+impl<'re, M: Manager> PoolRefBehavior<'re, M> for PoolRef<'re, M> {
+    fn from_idle(conn: IdleConn<M>, shared_pool: &'re SharedManagedPool<M>) -> Self {
+        Self {
             conn: Some(conn.into()),
             shared_pool,
             marker: None,
         }
     }
+
+    fn take_drop(mut self) {
+        let _ = self.take_conn();
+    }
 }
 
-impl<M: Manager> From<PoolRef<'_, M>> for PoolRefOwned<M> {
-    fn from(mut pool: PoolRef<'_, M>) -> Self {
+impl<M: Manager> PoolRefBehavior<'_, M> for PoolRefOwned<M> {
+    fn from_idle(conn: IdleConn<M>, shared_pool: &SharedManagedPool<M>) -> Self {
         Self {
-            conn: pool.conn.take(),
-            shared_pool: WrapPointer::downgrade(pool.shared_pool),
-            marker: pool.marker,
+            conn: Some(conn.into()),
+            shared_pool: WrapPointer::downgrade(shared_pool),
+            marker: None,
         }
+    }
+
+    fn take_drop(mut self) {
+        let _ = self.take_conn();
     }
 }
 
@@ -476,47 +610,6 @@ impl<M: Manager> DerefMut for PoolRefOwned<M> {
             .as_mut()
             .expect("Connection has already been taken")
             .conn
-    }
-}
-
-impl<M: Manager> PoolRef<'_, M> {
-    pub fn get_manager(&self) -> &M {
-        &self.shared_pool.manager
-    }
-
-    /// get a mut reference of connection.
-    pub fn get_conn(&mut self) -> &mut M::Connection {
-        &mut *self
-    }
-
-    /// take the the ownership of connection from pool and it won't be pushed back to pool anymore.
-    pub fn take_conn(&mut self) -> Option<M::Connection> {
-        self.conn.take().map(|c| {
-            self.marker = Some(c.marker);
-            c.conn
-        })
-    }
-
-    /// manually push a connection to pool. We treat this connection as a new born one.
-    ///
-    /// operation will fail if the pool is already in full capacity(no error will return and this connection will be dropped silently)
-    pub fn push_conn(&mut self, conn: M::Connection) {
-        // if the PoolRef have a marker then the conn must have been taken.
-        // otherwise we give the marker of self.conn to the newly generated one.
-        let marker = match self.marker {
-            Some(marker) => marker,
-            None => self.conn.as_ref().map(|c| c.get_marker()).unwrap(),
-        };
-
-        self.conn = Some(Conn {
-            conn,
-            marker,
-            birth: Instant::now(),
-        });
-    }
-
-    fn take_drop(mut self) {
-        let _ = self.take_conn();
     }
 }
 
