@@ -380,7 +380,7 @@ impl<M: Manager> Pool<M> {
         self.0.if_running(false);
     }
 
-    /// start the pool.
+    /// restart the pool.
     // ToDo: for now pool would lose accuracy for min_idle after restart. It would recover after certain amount of requests to pool.
     pub fn resume(&self) {
         self.0.if_running(true);
@@ -462,7 +462,7 @@ pub struct PoolRefOwned<M: Manager> {
     marker: Option<usize>,
 }
 
-impl<'re, M: Manager> PoolRef<'re, M> {
+impl<M: Manager> PoolRef<'_, M> {
     /// get a mut reference of connection.
     pub fn get_conn(&mut self) -> &mut M::Connection {
         &mut *self

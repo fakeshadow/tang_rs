@@ -2,9 +2,9 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
 #[cfg(feature = "no-send")]
-use std::rc::Rc;
+use std::rc::Rc as WrapPoint;
 #[cfg(not(feature = "no-send"))]
-use std::sync::Arc;
+use std::sync::Arc as WrapPoint;
 use std::time::Duration;
 
 use crate::pool::SharedManagedPool;
@@ -93,68 +93,59 @@ pub trait Manager: Sized + Send + Sync + 'static {
     fn on_stop(&self) {}
 }
 
-macro_rules! default_behaviors {
-    ($wrapper: tt) => {
-        /// helper trait to spawn default garbage collect process to `Pool<Manager>`.
-        pub trait GarbageCollect: Manager + ManagerInterval {
-            fn garbage_collect(&self, shared_pool: &SharedManagedPool<Self>) {
-                let builder = shared_pool.get_builder();
-                if builder.use_gc {
-                    let rate = builder.get_reaper_rate();
-                    let shared_pool = $wrapper::downgrade(shared_pool);
+/// helper trait to spawn default garbage collect process to `Pool<Manager>`.
+pub trait GarbageCollect: Manager + ManagerInterval {
+    fn garbage_collect(&self, shared_pool: &SharedManagedPool<Self>) {
+        let builder = shared_pool.get_builder();
+        if builder.use_gc {
+            let rate = builder.get_reaper_rate();
+            let shared_pool = WrapPoint::downgrade(shared_pool);
 
-                    let mut interval = Self::interval(rate * 6);
-                    self.spawn(async move {
-                        loop {
-                            let _i = Self::tick(&mut interval).await;
-                            match shared_pool.upgrade() {
-                                Some(shared_pool) => {
-                                    if shared_pool.is_running() {
-                                        shared_pool.garbage_collect();
-                                    }
-                                }
-                                None => break,
+            let mut interval = Self::interval(rate * 6);
+            self.spawn(async move {
+                loop {
+                    let _i = Self::tick(&mut interval).await;
+                    match shared_pool.upgrade() {
+                        Some(shared_pool) => {
+                            if shared_pool.is_running() {
+                                shared_pool.garbage_collect();
                             }
                         }
-                    });
+                        None => break,
+                    }
                 }
-            }
+            });
         }
-
-        /// helper trait to spawn default schedule reaping process to `Pool<Manager>`.
-        pub trait ScheduleReaping: Manager + ManagerInterval {
-            // schedule reaping runs in a spawned future.
-            fn schedule_reaping(&self, shared_pool: &SharedManagedPool<Self>) {
-                let builder = shared_pool.get_builder();
-                if builder.max_lifetime.is_some() || builder.idle_timeout.is_some() {
-                    let rate = builder.get_reaper_rate();
-
-                    let shared_pool = $wrapper::downgrade(shared_pool);
-
-                    let mut interval = Self::interval(rate);
-                    self.spawn(async move {
-                        loop {
-                            let _i = Self::tick(&mut interval).await;
-                            match shared_pool.upgrade() {
-                                Some(shared_pool) => {
-                                    if shared_pool.is_running() {
-                                        let _ = shared_pool.reap_idle_conn().await;
-                                    }
-                                }
-                                None => break,
-                            }
-                        }
-                    });
-                }
-            }
-        }
-    };
+    }
 }
 
-#[cfg(not(feature = "no-send"))]
-default_behaviors!(Arc);
-#[cfg(feature = "no-send")]
-default_behaviors!(Rc);
+/// helper trait to spawn default schedule reaping process to `Pool<Manager>`.
+pub trait ScheduleReaping: Manager + ManagerInterval {
+    // schedule reaping runs in a spawned future.
+    fn schedule_reaping(&self, shared_pool: &SharedManagedPool<Self>) {
+        let builder = shared_pool.get_builder();
+        if builder.max_lifetime.is_some() || builder.idle_timeout.is_some() {
+            let rate = builder.get_reaper_rate();
+
+            let shared_pool = WrapPoint::downgrade(shared_pool);
+
+            let mut interval = Self::interval(rate);
+            self.spawn(async move {
+                loop {
+                    let _i = Self::tick(&mut interval).await;
+                    match shared_pool.upgrade() {
+                        Some(shared_pool) => {
+                            if shared_pool.is_running() {
+                                let _ = shared_pool.reap_idle_conn().await;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            });
+        }
+    }
+}
 
 /// helper trait as we have different interval tick api in different runtime
 pub trait ManagerInterval {

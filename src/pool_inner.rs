@@ -102,6 +102,73 @@ impl<M: Manager> PoolInner<M> {
     }
 }
 
+macro_rules! pool_lock {
+    ($lock_type: ident, $guard_type: ident, $lock_method: ident, $try_lock_method: ident $(, $opt:ident)*) => {
+        pub(crate) struct PoolLock<M: Manager> {
+            inner: $lock_type<PoolInner<M>>
+        }
+
+        impl<M: Manager> PoolLock<M> {
+            pub(crate) fn new(pool_size: usize) -> Self {
+                PoolLock {
+                    inner: $lock_type::new(PoolInner::new(pool_size))
+                }
+            }
+
+            #[inline]
+            pub(crate) fn _lock(&self) -> $guard_type<'_, PoolInner<M>> {
+                self.inner.$lock_method()$(.$opt())*
+            }
+
+            #[inline]
+            pub(crate) fn _try_lock(&self) -> Option<$guard_type<'_, PoolInner<M>>> {
+                self.inner.$try_lock_method().ok()
+            }
+        }
+
+        impl<'re, M, R> PoolLockFuture<'re, M, R>
+        where M: Manager,
+              R: PoolRefBehavior<'re, M>
+        {
+            #[inline]
+            fn poll_pool_ref(
+                &mut self,
+                inner: &mut $guard_type<'re, PoolInner<M>>,
+            ) -> Poll<R> {
+                match inner.conn.pop_front() {
+                    Some(conn) => {
+                        self.acquired = true;
+                        Poll::Ready(R::from_idle(conn, self.shared_pool))
+                    }
+                    None => Poll::Pending,
+                }
+            }
+
+            #[inline]
+            fn spawn_idle_conn(&self, inner: &mut $guard_type<'_, PoolInner<M>>) {
+                let shared = self.shared_pool;
+
+                let builder = shared.get_builder();
+
+                if inner.total() < builder.get_max_size() {
+                    let marker = inner.marker;
+                    let shared_clone = shared.clone();
+                    shared.spawn(async move {
+                        let _ = shared_clone.add_idle_conn(marker).await;
+                    });
+                    inner.incr_pending(1);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "no-send"))]
+pool_lock!(Mutex, MutexGuard, lock, try_lock, unwrap);
+
+#[cfg(feature = "no-send")]
+pool_lock!(RefCell, RefMut, borrow_mut, try_borrow_mut);
+
 impl<M: Manager> PoolLock<M> {
     #[inline]
     pub(crate) fn lock<'a, R>(
@@ -168,15 +235,7 @@ impl<M: Manager> PoolLock<M> {
     {
         let mut inner = self._lock();
 
-        let len = inner.pending.len();
-
-        for index in 0..len {
-            if let Some(pending) = inner.pending.get(index) {
-                if should_drop(pending) {
-                    inner.pending.remove(index);
-                }
-            }
-        }
+        inner.pending.retain(|pending| !should_drop(pending));
     }
 
     // return new pending count and marker as Option<(usize, usize)>.
@@ -189,14 +248,16 @@ impl<M: Manager> PoolLock<M> {
         F: FnMut(&IdleConn<M>) -> bool,
     {
         self._try_lock().and_then(|mut inner| {
-            let len = inner.conn.len();
-            for index in 0..len {
-                if let Some(conn) = inner.conn.get(index) {
-                    if should_drop(conn) {
-                        inner.conn.remove(index);
-                        inner.decr_spawned(1);
-                    }
-                }
+            let conn = &mut inner.conn;
+
+            let len = conn.len();
+
+            conn.retain(|conn| !should_drop(conn));
+
+            let diff = len - conn.len();
+
+            if diff > 0 {
+                inner.decr_spawned(diff);
             }
 
             let total_now = inner.total();
@@ -312,73 +373,6 @@ impl<M: Manager, R> PoolLockFuture<'_, M, R> {
     }
 }
 
-macro_rules! pool_lock {
-    ($lock_type: ident, $guard_type: ident, $lock_method: ident, $try_lock_method: ident $(, $opt:ident)*) => {
-        pub(crate) struct PoolLock<M: Manager> {
-            inner: $lock_type<PoolInner<M>>
-        }
-
-        impl<M: Manager> PoolLock<M> {
-            pub(crate) fn new(pool_size: usize) -> Self {
-                PoolLock {
-                    inner: $lock_type::new(PoolInner::new(pool_size))
-                }
-            }
-
-            #[inline]
-            pub(crate) fn _lock(&self) -> $guard_type<'_, PoolInner<M>> {
-                self.inner.$lock_method()$(.$opt())*
-            }
-
-            #[inline]
-            pub(crate) fn _try_lock(&self) -> Option<$guard_type<'_, PoolInner<M>>> {
-                self.inner.$try_lock_method().ok()
-            }
-        }
-
-        impl<'re, M, R> PoolLockFuture<'re, M, R>
-        where M: Manager,
-              R: PoolRefBehavior<'re, M>
-        {
-            #[inline]
-            fn poll_pool_ref(
-                &mut self,
-                inner: &mut $guard_type<'re, PoolInner<M>>,
-            ) -> Poll<R> {
-                match inner.conn.pop_front() {
-                    Some(conn) => {
-                        self.acquired = true;
-                        Poll::Ready(R::from_idle(conn, self.shared_pool))
-                    }
-                    None => Poll::Pending,
-                }
-            }
-
-            #[inline]
-            fn spawn_idle_conn(&self, inner: &mut $guard_type<'_, PoolInner<M>>) {
-                let shared = self.shared_pool;
-
-                let builder = shared.get_builder();
-
-                if inner.total() < builder.get_max_size() {
-                    let marker = inner.marker;
-                    let shared_clone = shared.clone();
-                    shared.spawn(async move {
-                        let _ = shared_clone.add_idle_conn(marker).await;
-                    });
-                    inner.incr_pending(1);
-                }
-            }
-        }
-    }
-}
-
-#[cfg(not(feature = "no-send"))]
-pool_lock!(Mutex, MutexGuard, lock, try_lock, unwrap);
-
-#[cfg(feature = "no-send")]
-pool_lock!(RefCell, RefMut, borrow_mut, try_borrow_mut);
-
 impl<'re, M, R> Future for PoolLockFuture<'re, M, R>
 where
     M: Manager,
@@ -410,9 +404,14 @@ where
                     // if we can't get a PoolRef then we spawn a new connection if we have not hit the max pool size.
                     self.spawn_idle_conn(&mut inner);
 
-                    // if we are woken and have no key in waiters then we should not be in queue anymore.
                     let opt = unsafe { inner.waiters.get(wait_key) };
-                    if opt.is_none() {
+
+                    // We replace the waker if we are woken and have no key in waiters or have a new context which will not wake the old waker.
+                    if opt
+                        .as_ref()
+                        .map(|waker| !waker.will_wake(cx.waker()))
+                        .unwrap_or_else(|| true)
+                    {
                         let waker = cx.waker().clone();
                         *opt = Some(waker);
                     }

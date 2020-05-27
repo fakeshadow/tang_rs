@@ -3,6 +3,11 @@
 //! [bb8](https://docs.rs/bb8/0.3.1/bb8/)
 //! [L3-37](https://github.com/OneSignal/L3-37/)
 //!
+//! ## feature
+//!
+//! * `default` - multi thread pool where `Send` bound is needed for all futures.
+//! * `no-send` - single thread pool where `!Send` futures are accepted.
+//!
 //! # Known Limitation:
 //! can't be used in nested runtimes.
 //!

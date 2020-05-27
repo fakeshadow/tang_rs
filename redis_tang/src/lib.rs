@@ -1,3 +1,9 @@
+//! ## feature
+//!
+//! * `with-tokio` - default feature run on `tokio` runtime.
+//! * `with-async-std` - run on `smol` runtime.
+//! * `with-ntex` - run on `ntex` and `actix` runtime
+
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;

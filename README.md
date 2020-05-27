@@ -1,5 +1,6 @@
 # tang_rs
-A light weight connection pool.
+A light weight connection pool.<br>
+The main purpose is to keep a fair and balance usage of every connection no matter the workload.
 
 #### Requirement:
 `rustc 1.42.0`<br>
