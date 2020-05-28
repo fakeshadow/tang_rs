@@ -1,3 +1,9 @@
+(May 28, 2020)
+----------------------
+### Breaking
+- `Pool::run` would pass `PoolRef` to closure. This way the async block doesn't have to be wrapped by `Box::pin` therefore reduce allocation.
+
+
 (May 27, 2020)
 ----------------------
 ### Add

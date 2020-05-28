@@ -40,25 +40,20 @@ async fn main() -> std::io::Result<()> {
 
     // run pool in closure. it's slightly faster than pool.get().
     let _rows = pool
-        .run(|conn| {
-            Box::pin(
-                // pin the async function to make sure the &mut Conn outlives our closure.
-                async move {
-                    let (client, statements) = &conn;
+        .run(|mut pool_ref| async move {
+            let (client, statements) = &mut *pool_ref;
 
-                    // use statement alias to call specific prepared statement.
-                    let statement = statements.get("topics").expect(
-                        "handle the option if you are not sure if a prepared statement exists",
-                    );
+            // use statement alias to call specific prepared statement.
+            let statement = statements
+                .get("topics")
+                .expect("handle the option if you are not sure if a prepared statement exists");
 
-                    let ids = vec![1u32, 2, 3, 4, 5];
+            let ids = vec![1u32, 2, 3, 4, 5];
 
-                    let rows = client.query(statement, &[&ids]).await?;
+            let rows = client.query(statement, &[&ids]).await?;
 
-                    Ok::<_, PostgresPoolError>(rows)
-                    // infer type here so that u can use your custom error in the closure. you error type have to impl From<PostgresPoolError>.
-                },
-            )
+            Ok::<_, PostgresPoolError>(rows)
+            // infer type here so that u can use your custom error in the closure. you error type have to impl From<PostgresPoolError>.
         })
         .await
         .map_err(|e| {

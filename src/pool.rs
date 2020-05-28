@@ -1,7 +1,6 @@
 use std::fmt;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
 #[cfg(feature = "no-send")]
 use std::rc::{Rc as WrapPointer, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -271,7 +270,7 @@ impl<M: Manager> ManagedPool<M> {
                     should_drop |= now >= conn.idle_start + timeout;
                 }
                 if let Some(lifetime) = self.builder.max_lifetime {
-                    should_drop |= now >= conn.idle_start + lifetime;
+                    should_drop |= now >= conn.conn.birth + lifetime;
                 }
                 should_drop
             });
@@ -318,10 +317,79 @@ impl<M: Manager> Drop for Pool<M> {
 }
 
 impl<M: Manager> Pool<M> {
-    pub(crate) fn new(builder: Builder, manager: M) -> Self {
-        let size = builder.get_max_size();
-        let pool = ManagedPool::new(builder, manager, size);
-        Pool(WrapPointer::new(pool))
+    /// Return a `PoolRef` contains reference of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
+    ///
+    /// The `PoolRef` should be dropped asap when you finish the use of it. Hold it in scope would prevent the connection from pushed back to pool.
+    pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
+        let shared_pool = &self.0;
+
+        shared_pool.get_conn(shared_pool, 0).await
+    }
+
+    /// Return a `PoolRefOwned` contains a weak smart pointer of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
+    ///
+    /// You can move `PoolRefOwned` to async blocks and across await point. But the performance is considerably worse than `Pool::get`.
+    pub async fn get_owned(&self) -> Result<PoolRefOwned<M>, M::Error> {
+        let shared_pool = &self.0;
+
+        shared_pool.get_conn(shared_pool, 0).await
+    }
+
+    /// Run the pool with an async closure.
+    ///
+    /// # example:
+    /// ```ignore
+    /// pool.run(|mut pool_ref| async {
+    ///     let connection = &mut *pool_ref;
+    ///     Ok(())
+    /// })
+    /// ```
+    pub async fn run<'a, T, E, F, FF>(&'a self, f: F) -> Result<T, E>
+    where
+        F: FnOnce(PoolRef<'a, M>) -> FF,
+        FF: Future<Output = Result<T, E>> + Send + 'a,
+        E: From<M::Error>,
+        T: Send + 'static,
+    {
+        let pool_ref = self.get().await?;
+        f(pool_ref).await
+    }
+
+    /// Pause the pool
+    ///
+    /// these functionalities will stop:
+    /// - get connection. `Pool<Manager>::get()` would eventually be timed out
+    ///     (If `Manager::timeout` is manually implemented with proper timeout function. *. Otherwise it will stuck forever in executor unless you cancel the future).
+    /// - spawn of new connection.
+    /// - default scheduled works (They would skip at least one iteration if the schedule time come across with the time period the pool is paused).
+    /// - put back connection. (connection will be dropped instead.)
+    pub fn pause(&self) {
+        self.0.if_running(false);
+    }
+
+    /// restart the pool.
+    // ToDo: for now pool would lose accuracy for min_idle after restart. It would recover after certain amount of requests to pool.
+    pub fn resume(&self) {
+        self.0.if_running(true);
+    }
+
+    /// check if the pool is running.
+    pub fn running(&self) -> bool {
+        self.0.is_running()
+    }
+
+    /// Clear the pool.
+    ///
+    /// All pending connections will also be destroyed.
+    ///
+    /// Spawned count is not reset to 0 so new connections can't fill the pool until all outgoing `PoolRef` are dropped.
+    ///
+    /// All `PoolRef' and 'PoolRefOwned` outside of pool before the clear happen would be destroyed when trying to return it's connection to pool.
+    pub fn clear(&self) {
+        let shared_pool = &self.0;
+        shared_pool
+            .pool_lock
+            .clear(shared_pool.builder.get_max_size())
     }
 
     /// manually initialize pool. this is usually called when the `Pool` is built with `build_uninitialized`
@@ -368,67 +436,6 @@ impl<M: Manager> Pool<M> {
         Ok(())
     }
 
-    /// Pause the pool
-    ///
-    /// these functionalities will stop:
-    /// - get connection. `Pool<Manager>::get()` would eventually be timed out
-    ///     (If `Manager::timeout` is manually implemented with proper timeout function. *. Otherwise it will stuck forever in executor unless you cancel the future).
-    /// - spawn of new connection.
-    /// - default scheduled works (They would skip at least one iteration if the schedule time come across with the time period the pool is paused).
-    /// - put back connection. (connection will be dropped instead.)
-    pub fn pause(&self) {
-        self.0.if_running(false);
-    }
-
-    /// restart the pool.
-    // ToDo: for now pool would lose accuracy for min_idle after restart. It would recover after certain amount of requests to pool.
-    pub fn resume(&self) {
-        self.0.if_running(true);
-    }
-
-    /// Return a `PoolRef` contains reference of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
-    ///
-    /// The `PoolRef` should be dropped asap when you finish the use of it. Hold it in scope would prevent the connection from pushed back to pool.
-    pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
-        let shared_pool = &self.0;
-
-        shared_pool.get_conn(shared_pool, 0).await
-    }
-
-    /// Return a `PoolRefOwned` contains a weak smart pointer of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
-    ///
-    /// You can move `PoolRefOwned` to async blocks and across await point. But the performance is considerably worse than `Pool::get`.
-    pub async fn get_owned(&self) -> Result<PoolRefOwned<M>, M::Error> {
-        let shared_pool = &self.0;
-
-        shared_pool.get_conn(shared_pool, 0).await
-    }
-
-    /// Run the pool with a closure.
-    pub async fn run<T, E, F>(&self, f: F) -> Result<T, E>
-    where
-        F: FnOnce(&mut M::Connection) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + '_>>,
-        E: From<M::Error>,
-        T: Send + 'static,
-    {
-        let mut pool_ref = self.get().await?;
-        Box::pin(f(&mut *pool_ref)).await
-    }
-
-    /// Clear the pool.
-    ///
-    /// All pending connections will also be destroyed.
-    ///
-    /// Spawned count is not reset to 0 so new connections can't fill the pool until all outgoing `PoolRef` are dropped.
-    ///
-    /// All `PoolRef` outside of pool before the clear happen would be destroyed when trying to return it's connection to pool.
-    pub fn clear(&self) {
-        let shared_pool = &self.0;
-        shared_pool
-            .pool_lock
-            .clear(shared_pool.builder.get_max_size())
-    }
-
     /// Change the max size of pool. This operation could result in some reallocation of `PoolInner` and impact the performance.
     /// (`Pool<Manager>::clear()` will recalibrate the pool with a capacity of current max pool size)
     ///
@@ -446,6 +453,12 @@ impl<M: Manager> Pool<M> {
     /// Return a state of the pool inner. This call will block the thread and wait for lock.
     pub fn state(&self) -> State {
         self.0.pool_lock.state()
+    }
+
+    pub(crate) fn new(builder: Builder, manager: M) -> Self {
+        let size = builder.get_max_size();
+        let pool = ManagedPool::new(builder, manager, size);
+        Pool(WrapPointer::new(pool))
     }
 }
 
