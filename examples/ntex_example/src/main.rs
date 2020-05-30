@@ -39,7 +39,7 @@ async fn main() -> std::io::Result<()> {
                     // we build pool for every thread so the total connections would be threads * 3.
                     // (Make too many connections would result in very little performance gain and a relative heavy background tasks for pool scheduler tasks)
                     .min_idle(1)
-                    .max_size(3)
+                    .max_size(2)
                     .build(mgr)
             })
             .data_factory(|| {

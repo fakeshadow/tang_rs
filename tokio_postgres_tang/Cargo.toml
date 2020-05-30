@@ -26,11 +26,11 @@ default-features = false
 
 [dependencies.tang-rs]
 path = "../"
+default-features = false
 optional = true
 
 [dependencies.tokio-postgres]
 version = "0.5.3"
-default-feautres = false
 optional = true
 
 [dependencies.tokio]

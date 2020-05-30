@@ -19,7 +19,7 @@ pub struct Conn<M: Manager> {
 }
 
 impl<M: Manager> Conn<M> {
-    pub(crate) fn get_marker(&self) -> usize {
+    pub(crate) fn marker(&self) -> usize {
         self.marker
     }
 }
@@ -44,7 +44,7 @@ impl<M: Manager> IdleConn<M> {
 
     #[cfg(not(feature = "no-send"))]
     #[inline]
-    pub(crate) fn get_marker(&self) -> usize {
+    pub(crate) fn marker(&self) -> usize {
         self.conn.marker
     }
 }
@@ -497,7 +497,7 @@ impl<M: Manager> PoolRef<'_, M> {
         // otherwise we give the marker of self.conn to the newly generated one.
         let marker = match self.marker {
             Some(marker) => marker,
-            None => self.conn.as_ref().map(|c| c.get_marker()).unwrap(),
+            None => self.conn.as_ref().map(|c| c.marker()).unwrap(),
         };
 
         self.conn = Some(Conn {
@@ -534,7 +534,7 @@ impl<M: Manager> PoolRefOwned<M> {
         // otherwise we give the marker of self.conn to the newly generated one.
         let marker = match self.marker {
             Some(marker) => marker,
-            None => self.conn.as_ref().map(|c| c.get_marker()).unwrap(),
+            None => self.conn.as_ref().map(|c| c.marker()).unwrap(),
         };
 
         self.conn = Some(Conn {
@@ -652,10 +652,12 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
     fn drop_pool_ref(&self, conn: &mut Option<Conn<M>>, marker: Option<usize>) {
         // ToDo: currently we don't enable pause function for single thread pool.
         #[cfg(not(feature = "no-send"))]
-        if !self.is_running() {
-            // marker here doesn't matter as should_spawn_new would reject new connection generation
-            self.drop_conn(0, false);
-            return;
+        {
+            if !self.is_running() {
+                // marker here doesn't matter as should_spawn_new would reject new connection generation
+                self.drop_conn(0, false);
+                return;
+            }
         }
 
         let mut conn = match conn.take() {
