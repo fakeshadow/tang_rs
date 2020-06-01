@@ -8,6 +8,7 @@ use std::sync::Arc as WrapPoint;
 use std::time::Duration;
 
 use crate::pool::SharedManagedPool;
+use crate::util::timeout::ManagerTimeout;
 
 #[cfg(not(feature = "no-send"))]
 pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -18,6 +19,7 @@ pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 pub trait Manager: Sized + Send + Sync + 'static {
     type Connection: Send + Unpin + 'static;
     type Error: Send + Debug + From<Self::TimeoutError> + 'static;
+    type Timeout: Future<Output = Self::TimeoutError> + Send;
     type TimeoutError: Send + Debug + 'static;
 
     /// generate a new connection and put it into pool.
@@ -52,39 +54,7 @@ pub trait Manager: Sized + Send + Sync + 'static {
     /// Used to cancel futures and return `Manager::TimeoutError`.
     ///
     /// The duration is determined by `Builder.wait_timeout` and `Builder.connection_timeout`
-    ///
-    /// By default we ignore the timeout and await on the future directly.
-    ///
-    /// Override this method if you actually want to handle the timeout.
-    #[cfg(not(feature = "no-send"))]
-    fn timeout<'fu, Fut>(
-        &self,
-        fut: Fut,
-        _dur: Duration,
-    ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
-    where
-        Fut: Future + Send + 'fu,
-    {
-        Box::pin(async move {
-            let res = fut.await;
-            Ok(res)
-        })
-    }
-
-    #[cfg(feature = "no-send")]
-    fn timeout<'fu, Fut>(
-        &self,
-        fut: Fut,
-        _dur: Duration,
-    ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
-    where
-        Fut: Future + 'fu,
-    {
-        Box::pin(async move {
-            let res = fut.await;
-            Ok(res)
-        })
-    }
+    fn timeout<Fut: Future>(&self, fut: Fut, _dur: Duration) -> ManagerTimeout<Fut, Self::Timeout>;
 
     /// This method will be called when `Pool<Manager>::init()` executes.
     fn on_start(&self, _shared_pool: &SharedManagedPool<Self>) {}

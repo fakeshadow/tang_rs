@@ -77,12 +77,13 @@ pub struct ManagedPool<M: Manager> {
 }
 
 impl<M: Manager> ManagedPool<M> {
-    fn new(builder: Builder, manager: M, size: usize) -> Self {
+    fn new(builder: Builder, manager: M) -> Self {
+        let pool_lock = PoolLock::from_builder(&builder);
         Self {
             builder,
             manager,
             running: AtomicBool::new(true),
-            pool_lock: PoolLock::new(size),
+            pool_lock,
         }
     }
 
@@ -171,15 +172,14 @@ impl<M: Manager> ManagedPool<M> {
     fn drop_conn(&self, marker: usize, should_spawn_new: bool) -> Option<usize> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
-        self.pool_lock
-            .decr_spawned(marker, self.builder.min_idle, should_spawn_new)
+        self.pool_lock.decr_spawned(marker, should_spawn_new)
     }
 
     #[cfg(feature = "no-send")]
     fn drop_conn(&self) -> Option<usize> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
-        self.pool_lock.decr_spawned(self.builder.min_idle)
+        self.pool_lock.decr_spawned()
     }
 
     pub(crate) async fn add_idle_conn(&self, marker: usize) -> Result<(), M::Error> {
@@ -200,7 +200,7 @@ impl<M: Manager> ManagedPool<M> {
             })?;
 
         self.pool_lock
-            .put_back_incr_spawned(IdleConn::new(conn, marker), self.builder.get_max_size());
+            .put_back_incr_spawned(IdleConn::new(conn, marker));
 
         Ok(())
     }
@@ -262,18 +262,16 @@ impl<M: Manager> ManagedPool<M> {
     pub async fn reap_idle_conn(&self) -> Result<(), M::Error> {
         let now = Instant::now();
 
-        let pending_new = self
-            .pool_lock
-            .try_drop_conns(self.builder.min_idle, |conn| {
-                let mut should_drop = false;
-                if let Some(timeout) = self.builder.idle_timeout {
-                    should_drop |= now >= conn.idle_start + timeout;
-                }
-                if let Some(lifetime) = self.builder.max_lifetime {
-                    should_drop |= now >= conn.conn.birth + lifetime;
-                }
-                should_drop
-            });
+        let pending_new = self.pool_lock.try_drop_conns(|conn| {
+            let mut should_drop = false;
+            if let Some(timeout) = self.builder.idle_timeout {
+                should_drop |= now >= conn.idle_start + timeout;
+            }
+            if let Some(lifetime) = self.builder.max_lifetime {
+                should_drop |= now >= conn.conn.birth + lifetime;
+            }
+            should_drop
+        });
 
         match pending_new {
             Some((pending_new, marker)) => self.replenish_idle_conn(pending_new, marker).await,
@@ -320,6 +318,7 @@ impl<M: Manager> Pool<M> {
     /// Return a `PoolRef` contains reference of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
     ///
     /// The `PoolRef` should be dropped asap when you finish the use of it. Hold it in scope would prevent the connection from pushed back to pool.
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
         let shared_pool = &self.0;
 
@@ -329,6 +328,7 @@ impl<M: Manager> Pool<M> {
     /// Return a `PoolRefOwned` contains a weak smart pointer of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
     ///
     /// You can move `PoolRefOwned` to async blocks and across await point. But the performance is considerably worse than `Pool::get`.
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub async fn get_owned(&self) -> Result<PoolRefOwned<M>, M::Error> {
         let shared_pool = &self.0;
 
@@ -344,6 +344,7 @@ impl<M: Manager> Pool<M> {
     ///     Ok(())
     /// })
     /// ```
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub async fn run<'a, T, E, F, FF>(&'a self, f: F) -> Result<T, E>
     where
         F: FnOnce(PoolRef<'a, M>) -> FF,
@@ -386,10 +387,7 @@ impl<M: Manager> Pool<M> {
     ///
     /// All `PoolRef' and 'PoolRefOwned` outside of pool before the clear happen would be destroyed when trying to return it's connection to pool.
     pub fn clear(&self) {
-        let shared_pool = &self.0;
-        shared_pool
-            .pool_lock
-            .clear(shared_pool.builder.get_max_size())
+        self.0.pool_lock.clear()
     }
 
     /// manually initialize pool. this is usually called when the `Pool` is built with `build_uninitialized`
@@ -422,6 +420,7 @@ impl<M: Manager> Pool<M> {
     ///     Ok(())
     /// }
     /// ```
+    #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub async fn init(&self) -> Result<(), M::Error> {
         let shared_pool = &self.0;
 
@@ -437,12 +436,19 @@ impl<M: Manager> Pool<M> {
     }
 
     /// Change the max size of pool. This operation could result in some reallocation of `PoolInner` and impact the performance.
-    /// (`Pool<Manager>::clear()` will recalibrate the pool with a capacity of current max pool size)
+    /// (`Pool<Manager>::clear()` will recalibrate the pool with a capacity of current max/min pool size)
     ///
-    /// No actual check is used for new `max_size`. Be ware not to pass an max size smaller than `min_idle`.
-    // ToDo: make Builder.min_idle atomic and change it accordingly
+    /// No actual check is used for new `max_size`. Be ware not to pass a size smaller than `min_idle`.
     pub fn set_max_size(&self, size: usize) {
-        self.0.builder.set_max_size(size);
+        self.0.pool_lock.set_max_size(size);
+    }
+
+    /// Change the min idle size of pool.
+    /// (`Pool<Manager>::clear()` will recalibrate the pool with a capacity of current max/min pool size)
+    ///
+    /// No actual check is used for new `min_idle`. Be ware not to pass a size bigger than `max_size`.
+    pub fn set_min_idle(&self, size: usize) {
+        self.0.pool_lock.set_min_idle(size);
     }
 
     /// expose `Manager` to public
@@ -456,8 +462,7 @@ impl<M: Manager> Pool<M> {
     }
 
     pub(crate) fn new(builder: Builder, manager: M) -> Self {
-        let size = builder.get_max_size();
-        let pool = ManagedPool::new(builder, manager, size);
+        let pool = ManagedPool::new(builder, manager);
         Pool(WrapPointer::new(pool))
     }
 }
@@ -673,8 +678,7 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
         if is_closed {
             self.spawn_drop(conn.marker);
         } else {
-            self.pool_lock
-                .put_back(conn.into(), self.builder.get_max_size());
+            self.pool_lock.put_back(conn.into());
         };
     }
 

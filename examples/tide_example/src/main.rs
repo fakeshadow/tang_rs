@@ -1,8 +1,9 @@
 // an async_std only stack with tide
 
-use redis_tang::{Builder, Pool, RedisManager};
 use tide::{Error, Request, Response, StatusCode};
 use tokio_postgres::NoTls;
+
+use redis_tang::{Builder, Pool, RedisManager};
 use tokio_postgres_tang::PostgresManager;
 
 struct State {

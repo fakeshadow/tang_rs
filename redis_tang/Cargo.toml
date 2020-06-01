@@ -16,7 +16,7 @@ path = "src/lib.rs"
 [features]
 default = ["with-tokio"]
 with-tokio = ["tang-rs", "redis/tokio-rt-core", "tokio/time"]
-with-async-std = ["tang-rs", "async-std/unstable", "redis/async-std-comp"]
+with-async-std = ["tang-rs", "async-std/unstable", "redis/async-std-comp", "smol"]
 with-ntex = ["tang-rs/no-send", "tokio/time", "tokio/rt-util", "redis/tokio-rt-core"]
 
 [dependencies.async-std]
@@ -27,6 +27,10 @@ optional = true
 [dependencies.redis]
 version = "0.16.0"
 default-features = false
+optional = true
+
+[dependencies.smol]
+version = "0.1.10"
 optional = true
 
 [dependencies.tang-rs]

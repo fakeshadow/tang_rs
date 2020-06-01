@@ -9,21 +9,13 @@ use std::future::Future;
 use std::time::Duration;
 
 #[cfg(feature = "with-async-std")]
-use async_std::{
-    future::{timeout, TimeoutError},
-    prelude::StreamExt,
-    stream::{interval, Interval},
-    task,
-};
+use async_std::prelude::StreamExt;
 use redis::{aio::MultiplexedConnection, Client, IntoConnectionInfo, RedisError};
-#[cfg(not(feature = "with-async-std"))]
-use tokio::time::{
-    timeout, Elapsed as TimeoutError, {interval, Instant, Interval},
-};
 
 pub use tang_rs::{Builder, Pool, PoolRef, PoolRefOwned};
 use tang_rs::{
-    GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping, SharedManagedPool,
+    GarbageCollect, Manager, ManagerFuture, ManagerInterval, ManagerTimeout, ScheduleReaping,
+    SharedManagedPool,
 };
 
 #[derive(Clone)]
@@ -32,7 +24,6 @@ pub struct RedisManager {
 }
 
 impl RedisManager {
-    /// Create a new `RedisManager`
     pub fn new(params: impl IntoConnectionInfo) -> Self {
         RedisManager {
             client: Client::open(params).expect("Failed to open redis client"),
@@ -40,14 +31,14 @@ impl RedisManager {
     }
 }
 
-macro_rules! impl_manager_interval {
-    ($interval_type: ty, $tick_type: ty, $tick_method: ident) => {
+macro_rules! manager_interval {
+    ($interval_type: path, $interval_fn: path, $tick_type: path, $tick_method: ident) => {
         impl ManagerInterval for RedisManager {
             type Interval = $interval_type;
             type Tick = $tick_type;
 
             fn interval(dur: Duration) -> Self::Interval {
-                interval(dur)
+                $interval_fn(dur)
             }
 
             fn tick(tick: &mut Self::Interval) -> ManagerFuture<'_, Self::Tick> {
@@ -58,21 +49,32 @@ macro_rules! impl_manager_interval {
 }
 
 #[cfg(not(feature = "with-async-std"))]
-impl_manager_interval!(Interval, Instant, tick);
+manager_interval!(
+    tokio::time::Interval,
+    tokio::time::interval,
+    tokio::time::Instant,
+    tick
+);
 
 #[cfg(feature = "with-async-std")]
-impl_manager_interval!(Interval, Option<()>, next);
+manager_interval!(
+    async_std::stream::Interval,
+    async_std::stream::interval,
+    Option<()>,
+    next
+);
 
 impl ScheduleReaping for RedisManager {}
 
 impl GarbageCollect for RedisManager {}
 
-macro_rules! impl_manager {
-    ($connection: ty, $get_connection: ident, $spawn: path, $timeout: ident, $interval_tick: ident) => {
+macro_rules! manager {
+    ($connection: ty, $get_connection: ident, $spawn: path, $timeout: path, $timeout_err: ty, $delay_fn: path) => {
         impl Manager for RedisManager {
             type Connection = $connection;
             type Error = RedisPoolError;
-            type TimeoutError = TimeoutError;
+            type Timeout = $timeout;
+            type TimeoutError = $timeout_err;
 
             fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
                 Box::pin(async move {
@@ -111,28 +113,12 @@ macro_rules! impl_manager {
                 $spawn(fut);
             }
 
-            #[cfg(not(feature = "with-ntex"))]
-            fn timeout<'fu, Fut>(
+            fn timeout<Fut: Future>(
                 &self,
                 fut: Fut,
                 dur: Duration,
-            ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
-            where
-                Fut: Future + Send + 'fu,
-            {
-                Box::pin($timeout(dur, fut))
-            }
-
-            #[cfg(feature = "with-ntex")]
-            fn timeout<'fu, Fut>(
-                &self,
-                fut: Fut,
-                dur: Duration,
-            ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
-            where
-                Fut: Future + 'fu,
-            {
-                Box::pin($timeout(dur, fut))
+            ) -> ManagerTimeout<Fut, Self::Timeout> {
+                ManagerTimeout::new(fut, $delay_fn(dur))
             }
 
             fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
@@ -144,30 +130,33 @@ macro_rules! impl_manager {
 }
 
 #[cfg(feature = "with-ntex")]
-impl_manager!(
+manager!(
     MultiplexedConnection,
     get_multiplexed_tokio_connection,
     tokio::task::spawn_local,
-    timeout,
-    tick
+    tokio::time::Delay,
+    (),
+    tokio::time::delay_for
 );
 
 #[cfg(feature = "with-tokio")]
-impl_manager!(
+manager!(
     MultiplexedConnection,
     get_multiplexed_tokio_connection,
     tokio::spawn,
-    timeout,
-    tick
+    tokio::time::Delay,
+    (),
+    tokio::time::delay_for
 );
 
 #[cfg(feature = "with-async-std")]
-impl_manager!(
+manager!(
     MultiplexedConnection,
     get_multiplexed_async_std_connection,
-    task::spawn,
-    timeout,
-    next
+    async_std::task::spawn,
+    smol::Timer,
+    std::time::Instant,
+    smol::Timer::after
 );
 
 impl std::fmt::Debug for RedisManager {
@@ -199,8 +188,16 @@ impl From<RedisError> for RedisPoolError {
     }
 }
 
-impl From<TimeoutError> for RedisPoolError {
-    fn from(_e: TimeoutError) -> RedisPoolError {
+#[cfg(not(feature = "with-async-std"))]
+impl From<()> for RedisPoolError {
+    fn from(_: ()) -> RedisPoolError {
+        RedisPoolError::TimeOut
+    }
+}
+
+#[cfg(feature = "with-async-std")]
+impl From<std::time::Instant> for RedisPoolError {
+    fn from(_: std::time::Instant) -> RedisPoolError {
         RedisPoolError::TimeOut
     }
 }

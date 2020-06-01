@@ -86,10 +86,17 @@ use std::time::Duration;
 
 use futures_util::{future::join_all, TryFutureExt};
 use tokio_postgres::Client;
+#[cfg(not(feature = "with-async-std"))]
+use tokio_postgres::{
+    tls::{MakeTlsConnect, TlsConnect},
+    types::Type,
+    Config, Error, Socket, Statement,
+};
 
 pub use tang_rs::{Builder, Pool, PoolRef, PoolRefOwned};
 use tang_rs::{
-    GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping, SharedManagedPool,
+    GarbageCollect, Manager, ManagerFuture, ManagerInterval, ManagerTimeout, ScheduleReaping,
+    SharedManagedPool,
 };
 #[cfg(feature = "with-async-std")]
 use {
@@ -98,21 +105,7 @@ use {
         types::Type,
         Config, Error, Socket, Statement,
     },
-    async_std::{
-        future::{timeout, TimeoutError},
-        prelude::StreamExt,
-        stream::{interval, Interval},
-        task,
-    },
-};
-#[cfg(not(feature = "with-async-std"))]
-use {
-    tokio::time::{interval, timeout, Elapsed as TimeoutError, Instant, Interval},
-    tokio_postgres::{
-        tls::{MakeTlsConnect, TlsConnect},
-        types::Type,
-        Config, Error, Socket, Statement,
-    },
+    async_std::prelude::StreamExt,
 };
 
 pub struct PostgresManager<Tls>
@@ -170,8 +163,8 @@ where
     }
 }
 
-macro_rules! impl_manager_interval {
-    ($interval_type: ty, $tick_type: ty, $tick_method: ident) => {
+macro_rules! manager_interval {
+    ($interval_type: path, $interval_fn: path, $tick_type: path, $tick_method: ident) => {
         impl<Tls> ManagerInterval for PostgresManager<Tls>
         where
             Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
@@ -183,7 +176,7 @@ macro_rules! impl_manager_interval {
             type Tick = $tick_type;
 
             fn interval(dur: Duration) -> Self::Interval {
-                interval(dur)
+                $interval_fn(dur)
             }
 
             fn tick(tick: &mut Self::Interval) -> ManagerFuture<'_, Self::Tick> {
@@ -194,10 +187,20 @@ macro_rules! impl_manager_interval {
 }
 
 #[cfg(not(feature = "with-async-std"))]
-impl_manager_interval!(Interval, Instant, tick);
+manager_interval!(
+    tokio::time::Interval,
+    tokio::time::interval,
+    tokio::time::Instant,
+    tick
+);
 
 #[cfg(feature = "with-async-std")]
-impl_manager_interval!(Interval, Option<()>, next);
+manager_interval!(
+    async_std::stream::Interval,
+    async_std::stream::interval,
+    Option<()>,
+    next
+);
 
 impl<Tls> ScheduleReaping for PostgresManager<Tls>
 where
@@ -217,8 +220,8 @@ where
 {
 }
 
-macro_rules! impl_manager {
-    ($connection: ty, $spawn: path, $timeout: ident) => {
+macro_rules! manager {
+    ($connection: ty, $spawn: path, $timeout: path, $timeout_err: ty, $delay_fn: path) => {
         impl<Tls> Manager for PostgresManager<Tls>
         where
             Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
@@ -228,7 +231,8 @@ macro_rules! impl_manager {
         {
             type Connection = $connection;
             type Error = PostgresPoolError;
-            type TimeoutError = TimeoutError;
+            type Timeout = $timeout;
+            type TimeoutError = $timeout_err;
 
             fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
                 Box::pin(async move {
@@ -299,28 +303,12 @@ macro_rules! impl_manager {
                 $spawn(fut);
             }
 
-            #[cfg(not(feature = "with-ntex"))]
-            fn timeout<'fu, Fut>(
+            fn timeout<Fut: Future>(
                 &self,
                 fut: Fut,
                 dur: Duration,
-            ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
-            where
-                Fut: Future + 'fu + Send,
-            {
-                Box::pin($timeout(dur, fut))
-            }
-
-            #[cfg(feature = "with-ntex")]
-            fn timeout<'fu, Fut>(
-                &self,
-                fut: Fut,
-                dur: Duration,
-            ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
-            where
-                Fut: Future + 'fu,
-            {
-                Box::pin($timeout(dur, fut))
+            ) -> ManagerTimeout<Fut, Self::Timeout> {
+                ManagerTimeout::new(fut, $delay_fn(dur))
             }
 
             fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
@@ -332,17 +320,29 @@ macro_rules! impl_manager {
 }
 
 #[cfg(feature = "with-ntex")]
-impl_manager!(
+manager!(
     (Client, HashMap<String, Statement>),
     tokio::task::spawn_local,
-    timeout
+    tokio::time::Delay,
+    (),
+    tokio::time::delay_for
 );
-
 #[cfg(feature = "with-tokio")]
-impl_manager!((Client, HashMap<String, Statement>), tokio::spawn, timeout);
-
+manager!(
+    (Client, HashMap<String, Statement>),
+    tokio::spawn,
+    tokio::time::Delay,
+    (),
+    tokio::time::delay_for
+);
 #[cfg(feature = "with-async-std")]
-impl_manager!((Client, HashMap<String, Statement>), task::spawn, timeout);
+manager!(
+    (Client, HashMap<String, Statement>),
+    async_std::task::spawn,
+    smol::Timer,
+    std::time::Instant,
+    smol::Timer::after
+);
 
 impl<Tls> fmt::Debug for PostgresManager<Tls>
 where
@@ -505,8 +505,16 @@ impl From<Error> for PostgresPoolError {
     }
 }
 
-impl From<TimeoutError> for PostgresPoolError {
-    fn from(_e: TimeoutError) -> PostgresPoolError {
+#[cfg(not(feature = "with-async-std"))]
+impl From<()> for PostgresPoolError {
+    fn from(_: ()) -> PostgresPoolError {
+        PostgresPoolError::TimeOut
+    }
+}
+
+#[cfg(feature = "with-async-std")]
+impl From<std::time::Instant> for PostgresPoolError {
+    fn from(_: std::time::Instant) -> PostgresPoolError {
         PostgresPoolError::TimeOut
     }
 }

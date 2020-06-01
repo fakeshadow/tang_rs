@@ -8,8 +8,8 @@ use mongodb::{
     options::{ClientOptions, StreamAddress},
     Client,
 };
-use tang_rs::{Manager, ManagerFuture};
-use tokio::time::{timeout, Elapsed};
+
+use tang_rs::{Manager, ManagerFuture, ManagerTimeout};
 
 pub struct MongoManager {
     host: String,
@@ -30,7 +30,8 @@ impl MongoManager {
 impl Manager for MongoManager {
     type Connection = Client;
     type Error = MongoPoolError;
-    type TimeoutError = Elapsed;
+    type Timeout = tokio::tome::Delay;
+    type TimeoutError = ();
 
     fn connect(&self) -> ManagerFuture<Result<Self::Connection, Self::Error>> {
         Box::pin(async move {
@@ -67,15 +68,8 @@ impl Manager for MongoManager {
         tokio::spawn(fut);
     }
 
-    fn timeout<'fu, Fut>(
-        &self,
-        fut: Fut,
-        dur: Duration,
-    ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
-    where
-        Fut: Future + Send + 'fu,
-    {
-        Box::pin(timeout(dur, fut))
+    fn timeout<Fut: Future>(&self, fut: Fut, _dur: Duration) -> ManagerTimeout<Fut, Self::Timeout> {
+        ManagerTimeout::new(fut, tokio::time::delay_for(dur))
     }
 }
 
@@ -115,8 +109,8 @@ impl From<Error> for MongoPoolError {
     }
 }
 
-impl From<Elapsed> for MongoPoolError {
-    fn from(_e: Elapsed) -> MongoPoolError {
+impl From<()> for MongoPoolError {
+    fn from(_e: ()) -> MongoPoolError {
         MongoPoolError::TimeOut
     }
 }

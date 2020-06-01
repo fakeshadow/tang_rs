@@ -34,3 +34,6 @@ members = [
 [dev-dependencies.async-std]
 version = "1.6.0"
 features = ["attributes", "unstable"]
+
+[dev-dependencies.smol]
+version = "0.1.10"

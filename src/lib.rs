@@ -19,9 +19,11 @@
 //! use std::fmt::{Debug, Formatter, Result as FmtResult};
 //! use std::future::Future;
 //! use std::sync::atomic::{AtomicUsize, Ordering};
+//! use std::time::{Duration, Instant};
 //!
 //! use async_std::task;
-//! use tang_rs::{Builder, Manager, ManagerFuture};
+//! use smol::Timer;
+//! use tang_rs::{Builder, Manager, ManagerFuture, ManagerTimeout};
 //!
 //! // our test pool would just generate usize from 0 as connections.
 //! struct TestPoolManager(AtomicUsize);
@@ -43,10 +45,18 @@
 //!     }
 //! }
 //!
+//! // convert instant as timeout error to our pool error.
+//! impl From<Instant> for TestPoolError {
+//!     fn from(_: Instant) -> Self {
+//!         TestPoolError
+//!     }
+//! }
+//!
 //! impl Manager for TestPoolManager {
 //!     type Connection = usize;
 //!     type Error = TestPoolError;
-//!     type TimeoutError = TestPoolError;
+//!     type Timeout = Timer;
+//!     type TimeoutError = Instant;
 //!
 //!     fn connect(&self) -> ManagerFuture<'_, Result<Self::Connection, Self::Error>> {
 //!         // how we generate new connections and put them into pool.
@@ -76,6 +86,10 @@
 //!         // you can use the handler to further manage them if you want.
 //!         // normally we just spawn the task and forget about it.
 //!         let _handler = task::spawn(fut);
+//!     }
+//!
+//!     fn timeout<Fut: Future>(&self,fut: Fut, dur: Duration) -> ManagerTimeout<Fut, Self::Timeout> {
+//!         ManagerTimeout::new(fut, Timer::after(dur))
 //!     }
 //! }
 //!
@@ -120,6 +134,7 @@
 pub use builder::Builder;
 pub use manager::{GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping};
 pub use pool::{Pool, PoolRef, PoolRefOwned, SharedManagedPool};
+pub use util::timeout::ManagerTimeout;
 
 mod builder;
 mod manager;

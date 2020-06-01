@@ -4,18 +4,18 @@
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_std::{
-    future::{timeout, TimeoutError},
     prelude::StreamExt,
     stream::{interval, Interval},
     task,
 };
+use smol::Timer;
 
 use tang_rs::{
-    Builder, GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping,
-    SharedManagedPool,
+    Builder, GarbageCollect, Manager, ManagerFuture, ManagerInterval, ManagerTimeout,
+    ScheduleReaping, SharedManagedPool,
 };
 
 // our test pool would just generate usize from 0 as connections.
@@ -38,9 +38,9 @@ impl Debug for TestPoolError {
     }
 }
 
-// you can use the same Error type for Manager::Error and Manager::TimeoutError. and ignore the error convert.
-impl From<TimeoutError> for TestPoolError {
-    fn from(_e: TimeoutError) -> Self {
+// the default timeout output for async-std is std::time::Instant. We map it to error.
+impl From<Instant> for TestPoolError {
+    fn from(_e: Instant) -> Self {
         TestPoolError
     }
 }
@@ -70,7 +70,8 @@ impl ManagerInterval for TestPoolManager {
 impl Manager for TestPoolManager {
     type Connection = usize;
     type Error = TestPoolError;
-    type TimeoutError = TimeoutError;
+    type Timeout = Timer;
+    type TimeoutError = Instant;
 
     fn connect(&self) -> ManagerFuture<'_, Result<Self::Connection, Self::Error>> {
         // how we generate new connections and put them into pool.
@@ -101,15 +102,8 @@ impl Manager for TestPoolManager {
 
     // override timeout method if you want to handle the timeout error.
     // The duration is determined by `Builder::wait_timeout` or `Builder::connection_timeout`
-    fn timeout<'fu, Fut>(
-        &self,
-        fut: Fut,
-        dur: Duration,
-    ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
-    where
-        Fut: Future + Send + 'fu,
-    {
-        Box::pin(timeout(dur, fut))
+    fn timeout<Fut: Future>(&self, fut: Fut, dur: Duration) -> ManagerTimeout<Fut, Self::Timeout> {
+        ManagerTimeout::new(fut, Timer::after(dur))
     }
 
     // We have to attach the behaviors(GarbageCollect and ScheduleReaping traits) to this hook so that they can start with pool.

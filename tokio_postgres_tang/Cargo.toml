@@ -7,7 +7,7 @@ edition = "2018"
 [features]
 default = ["with-tokio"]
 with-tokio = ["tang-rs", "tokio/rt-threaded", "tokio/time", "tokio-postgres/runtime"]
-with-async-std = ["tang-rs", "async-postgres", "async-std/unstable", "tokio-postgres"]
+with-async-std = ["tang-rs", "async-postgres", "async-std/unstable", "smol", "tokio-postgres"]
 with-ntex = [ "tang-rs/no-send", "tokio/time", "tokio/rt-util", "tokio-postgres/runtime"]
 
 [dependencies.async-postgres]
@@ -23,6 +23,10 @@ optional = true
 [dependencies.futures-util]
 version = "0.3.4"
 default-features = false
+
+[dependencies.smol]
+version = "0.1.10"
+optional = true
 
 [dependencies.tang-rs]
 path = "../"

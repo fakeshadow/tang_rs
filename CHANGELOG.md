@@ -1,3 +1,9 @@
+(Jun 1, 2020)
+----------------------
+### Breaking
+- `Manager` trait use concrete type `ManagerTimeout` for Timeout. This helps to reduce one `Box` every time we try to get a connection.
+
+
 (May 28, 2020)
 ----------------------
 ### Breaking
@@ -38,7 +44,7 @@
 (May 9, 2020)
 ----------------------
 ### Breaking
-- `Manager` trait: Remove `schedule_inner` and `garbage_collect_innner`. `on_start` do nothing by default.
+- `Manager` trait: Remove `schedule_inner` and `garbage_collect_inner`. `on_start` do nothing by default.
 - This make the trait more simple to impl for non scheduled cases.
 ### Add
 - `Manager::on_stop` method which will be called when `Pool<Manager>` is dropping.
@@ -107,7 +113,7 @@ This enable use of `Pool<Manager>` with `lazy_static`.
 (October 3, 2019)
 ----------------------
 ### Breaking
-- Return error type `tang_rs::PostgresPoolError` and `tang_rs::RedisPoolEror` when use `Pool<Manager>.get()` 
+- Return error type `tang_rs::PostgresPoolError` and `tang_rs::RedisPoolError` when use `Pool<Manager>.get()`
 ### Add
 - `PoolRef.take_conn()` method to take the ownership of connection out from pool.
 - `Builder.queue_timeout(<Duration>)` method to indicate the timeout of waiting queue for pool.

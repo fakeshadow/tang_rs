@@ -4,15 +4,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_std::{
-    future::{timeout, TimeoutError},
     prelude::*,
     stream::{interval, Interval},
-    task,
+    task::{self, sleep},
 };
-
+use smol::Timer;
 use tang_rs::{
-    Builder, GarbageCollect, Manager, ManagerFuture, ManagerInterval, Pool, PoolRef,
-    ScheduleReaping, SharedManagedPool,
+    Builder, GarbageCollect, Manager, ManagerFuture, ManagerInterval, ManagerTimeout, Pool,
+    PoolRef, ScheduleReaping, SharedManagedPool,
 };
 
 macro_rules! test_pool {
@@ -21,8 +20,8 @@ macro_rules! test_pool {
 
         struct TestPoolError;
 
-        impl From<TimeoutError> for TestPoolError {
-            fn from(_: TimeoutError) -> Self {
+        impl From<Instant> for TestPoolError {
+            fn from(_: Instant) -> Self {
                 TestPoolError
             }
         }
@@ -55,7 +54,8 @@ macro_rules! test_pool {
         impl Manager for TestPoolManager {
             type Connection = usize;
             type Error = TestPoolError;
-            type TimeoutError = TimeoutError;
+            type Timeout = Timer;
+            type TimeoutError = Instant;
 
             fn connect(&self) -> ManagerFuture<'_, Result<Self::Connection, Self::Error>> {
                 Box::pin(async move { Ok(self.0.fetch_add(1, Ordering::SeqCst)) })
@@ -89,15 +89,12 @@ macro_rules! test_pool {
                 task::spawn(fut);
             }
 
-            fn timeout<'fu, Fut>(
+            fn timeout<Fut: Future>(
                 &self,
                 fut: Fut,
                 dur: Duration,
-            ) -> ManagerFuture<'fu, Result<Fut::Output, Self::TimeoutError>>
-            where
-                Fut: Future + Send + 'fu,
-            {
-                Box::pin(timeout(dur, fut))
+            ) -> ManagerTimeout<Fut, Self::Timeout> {
+                ManagerTimeout::new(fut, Timer::after(dur))
             }
 
             fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
@@ -265,9 +262,7 @@ async fn idle_timeout() {
 
     pool_state(&pool, 4, 4, 0);
 
-    let mut interval = interval(Duration::from_secs(6));
-
-    interval.next().await;
+    sleep(Duration::from_secs(6)).await;
 
     pool_state(&pool, 2, 2, 0);
 }
@@ -297,14 +292,9 @@ async fn max_lifetime() {
     assert_eq!(8, conns.len());
     drop(conns);
 
-    let state = pool.state();
-    assert_eq!(4, state.idle_connections);
-    assert_eq!(4, state.connections);
-    assert_eq!(0, state.pending_connections.len());
+    pool_state(&pool, 4, 4, 0);
 
-    let mut interval = interval(Duration::from_secs(6));
-
-    interval.next().await;
+    sleep(Duration::from_secs(6)).await;
 
     pool_state(&pool, 2, 2, 0);
 }
@@ -392,11 +382,31 @@ async fn set_max() {
         conns.push(conn);
     }
 
-    pool_state(&pool, 16, 0, 0);
-
     pool.set_max_size(7);
 
     drop(conns);
+
+    pool_state(&pool, 7, 7, 0);
+}
+
+#[async_std::test]
+async fn set_min() {
+    test_pool!(1, 100);
+
+    let mgr = TestPoolManager(AtomicUsize::new(0));
+
+    let pool = Builder::new()
+        .always_check(false)
+        .min_idle(4)
+        .max_size(16)
+        .reaper_rate(Duration::from_secs(1))
+        .build(mgr)
+        .await
+        .expect("fail to build pool");
+
+    pool.set_min_idle(7);
+
+    sleep(Duration::from_secs(3)).await;
 
     pool_state(&pool, 7, 7, 0);
 }

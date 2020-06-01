@@ -11,3 +11,6 @@ path = "../../"
 [dependencies.async-std]
 version = "1.6.0"
 features = ["attributes", "unstable"]
+
+[dependencies.smol]
+version = "0.1.10"
