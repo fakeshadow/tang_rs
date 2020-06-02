@@ -38,7 +38,7 @@ async fn main() -> std::io::Result<()> {
                     .max_lifetime(None)
                     // we build pool for every thread so the total connections would be threads * 3.
                     // (Make too many connections would result in very little performance gain and a relative heavy background tasks for pool scheduler tasks)
-                    .min_idle(1)
+                    .min_idle(2)
                     .max_size(2)
                     .build(mgr)
             })
@@ -62,8 +62,6 @@ async fn main() -> std::io::Result<()> {
 }
 
 async fn test(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResponse, Error> {
-    // println!("pool state is {:#?}", pool.state());
-
     let ids = vec![
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];

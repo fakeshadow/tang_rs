@@ -125,27 +125,21 @@ impl Builder {
 
     /// Consumes the `Builder`, returning a new, initialized `Pool`.
     pub async fn build<M: Manager>(self, manager: M) -> Result<Pool<M>, M::Error> {
-        assert!(
-            self.max_size >= self.min_idle,
-            "min_idle must be no larger than max_size"
-        );
-
-        let pool = Pool::new(self, manager);
+        let pool = self.build_uninitialized(manager);
         pool.init().await?;
-
         Ok(pool)
     }
 
     /// Consumes the `Builder`, returning a new uninitialized `Pool`.
     ///
     /// (`Pool` have no connection and scheduled tasks like connection reaper and garbage collect)
-    pub fn build_uninitialized<M: Manager>(self, manager: M) -> Result<Pool<M>, M::Error> {
+    pub fn build_uninitialized<M: Manager>(self, manager: M) -> Pool<M> {
         assert!(
             self.max_size >= self.min_idle,
             "min_idle must be no larger than max_size"
         );
 
-        Ok(Pool::new(self, manager))
+        Pool::new(self, manager)
     }
 
     /// expose `reaper_rate` to public.

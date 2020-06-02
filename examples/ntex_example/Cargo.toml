@@ -11,6 +11,7 @@ version = "0.3.4"
 [dependencies.ntex]
 git = "https://github.com/ntex-rs/ntex"
 
+
 [dependencies.once_cell]
 version = "1.2.0"
 

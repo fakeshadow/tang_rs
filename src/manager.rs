@@ -2,9 +2,9 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::pin::Pin;
 #[cfg(feature = "no-send")]
-use std::rc::Rc as WrapPoint;
+use std::rc::Rc as WrapPointer;
 #[cfg(not(feature = "no-send"))]
-use std::sync::Arc as WrapPoint;
+use std::sync::Arc as WrapPointer;
 use std::time::Duration;
 
 use crate::pool::SharedManagedPool;
@@ -16,6 +16,14 @@ pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[cfg(feature = "no-send")]
 pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
+/// # Types for different runtimes:
+///
+/// Trait type                  runtime                 Type                        constructor
+/// <Manager::Timeout>          tokio                   tokio::time::Delay          tokio::time::delay_for
+///                             async-std               smol::Timer                 smol::Timer::after
+///
+/// <Manager::TimeoutError>     tokio                   ()
+///                             async-std               std::time::Instant
 pub trait Manager: Sized + Send + Sync + 'static {
     type Connection: Send + Unpin + 'static;
     type Error: Send + Debug + From<Self::TimeoutError> + 'static;
@@ -69,7 +77,7 @@ pub trait GarbageCollect: Manager + ManagerInterval {
         let builder = shared_pool.get_builder();
         if builder.use_gc {
             let rate = builder.get_reaper_rate();
-            let shared_pool = WrapPoint::downgrade(shared_pool);
+            let shared_pool = WrapPointer::downgrade(shared_pool);
 
             let mut interval = Self::interval(rate * 6);
             self.spawn(async move {
@@ -97,7 +105,7 @@ pub trait ScheduleReaping: Manager + ManagerInterval {
         if builder.max_lifetime.is_some() || builder.idle_timeout.is_some() {
             let rate = builder.get_reaper_rate();
 
-            let shared_pool = WrapPoint::downgrade(shared_pool);
+            let shared_pool = WrapPointer::downgrade(shared_pool);
 
             let mut interval = Self::interval(rate);
             self.spawn(async move {

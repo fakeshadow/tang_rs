@@ -143,4 +143,4 @@ mod pool_inner;
 mod util;
 
 #[cfg(all(feature = "default", feature = "no-send"))]
-compile_error!("only one of 'default' or 'no-send' features must be enabled");
+compile_error!("only one of 'default' or 'no-send' features can be enabled");

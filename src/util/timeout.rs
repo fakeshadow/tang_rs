@@ -31,7 +31,7 @@ where
 
         unsafe {
             match self.map_unchecked_mut(|this| &mut this.delay).poll(cx) {
-                Poll::Ready(d) => Poll::Ready(Err(d)),
+                Poll::Ready(e) => Poll::Ready(Err(e)),
                 Poll::Pending => Poll::Pending,
             }
         }

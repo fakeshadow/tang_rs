@@ -1,3 +1,9 @@
+(Jun 2, 2020)
+----------------------
+### Breaking
+- `Builder::build_uninitialized` return `Pool<Manager>` directly and no unwrap needed.
+
+
 (Jun 1, 2020)
 ----------------------
 ### Breaking

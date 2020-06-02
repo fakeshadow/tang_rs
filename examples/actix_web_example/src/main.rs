@@ -35,7 +35,6 @@ static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
         .min_idle(1)
         .max_size(24)
         .build_uninitialized(mgr)
-        .unwrap_or_else(|e| panic!("{:?}", e))
 });
 
 #[actix_rt::main]

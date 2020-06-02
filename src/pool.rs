@@ -410,8 +410,7 @@ impl<M: Manager> Pool<M> {
     ///         .build_uninitialized(
     ///             PostgresManager::new_from_stringlike("postgres://postgres:123@localhost/test", NoTls)
     ///                 .expect("can't make postgres manager")
-    ///         )
-    ///         .unwrap_or_else(|e| panic!("{:?}", e));
+    ///         );
     /// }
     ///
     /// #[tokio::main]
@@ -654,6 +653,7 @@ trait DropAndSpawn<M: Manager> {
 }
 
 impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
+    #[inline]
     fn drop_pool_ref(&self, conn: &mut Option<Conn<M>>, marker: Option<usize>) {
         // ToDo: currently we don't enable pause function for single thread pool.
         #[cfg(not(feature = "no-send"))]
