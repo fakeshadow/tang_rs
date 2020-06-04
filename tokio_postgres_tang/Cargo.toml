@@ -34,7 +34,7 @@ default-features = false
 optional = true
 
 [dependencies.tokio-postgres]
-version = "0.5.3"
+version = "0.5.4"
 optional = true
 
 [dependencies.tokio]

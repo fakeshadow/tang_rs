@@ -480,7 +480,6 @@ macro_rules! pool_lock {
                 self.waiters.$lock_method()$(.$opt())*
             }
 
-            #[inline]
             pub(crate) fn _try_lock(&self) -> Option<$guard_type<'_, WakerList>> {
                 self.waiters.$try_lock_method().ok()
             }

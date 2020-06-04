@@ -6,12 +6,11 @@ use std::fmt::Debug;
 use actix_web::{error::ErrorInternalServerError, web, App, Error, HttpResponse, HttpServer};
 use futures_util::TryStreamExt;
 use once_cell::sync::Lazy;
+use redis_tang::RedisManager;
 use tokio_postgres::{
     types::{ToSql, Type},
     NoTls, Row,
 };
-
-use redis_tang::RedisManager;
 use tokio_postgres_tang::{Builder, Pool, PostgresManager};
 
 // use once cell for a static tokio-postgres pool. so we don't have to pass the pool to App::data

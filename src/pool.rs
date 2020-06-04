@@ -9,7 +9,7 @@ use std::sync::{Arc as WrapPointer, Weak};
 use std::time::Instant;
 
 use crate::builder::Builder;
-use crate::manager::{Manager, ManagerFuture};
+use crate::manager::Manager;
 use crate::pool_inner::{PoolLock, State};
 
 pub struct Conn<M: Manager> {
@@ -79,6 +79,7 @@ pub struct ManagedPool<M: Manager> {
 impl<M: Manager> ManagedPool<M> {
     fn new(builder: Builder, manager: M) -> Self {
         let pool_lock = PoolLock::from_builder(&builder);
+
         Self {
             builder,
             manager,
@@ -87,85 +88,42 @@ impl<M: Manager> ManagedPool<M> {
         }
     }
 
-    // Recursive if the connection is broken when `Builder.always_check == true`. We exit with at most 3 retries.
-    #[cfg(not(feature = "no-send"))]
-    fn get_conn<'a, R>(
-        &'a self,
-        shared_pool: &'a SharedManagedPool<M>,
-        mut retry: u8,
-    ) -> ManagerFuture<Result<R, M::Error>>
-    where
-        R: PoolRefBehavior<'a, M> + Send + Unpin,
-    {
-        Box::pin(async move {
-            let fut = self.pool_lock.lock::<R>(shared_pool);
-            let timeout = self.builder.wait_timeout;
-
-            let mut pool_ref = self.manager.timeout(fut, timeout).await?;
-
-            if self.builder.always_check {
-                let result = self.check_conn(&mut *pool_ref).await;
-
-                match result {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(e)) => {
-                        pool_ref.take_drop();
-                        return if retry == 3 {
-                            Err(e)
-                        } else {
-                            retry += 1;
-                            self.get_conn(shared_pool, retry).await
-                        };
-                    }
-                    Err(timeout) => {
-                        pool_ref.take_drop();
-                        return Err(timeout);
-                    }
-                }
-            };
-
-            Ok(pool_ref)
-        })
-    }
-
-    #[cfg(feature = "no-send")]
-    fn get_conn<'a, R>(
-        &'a self,
-        shared_pool: &'a SharedManagedPool<M>,
-        mut retry: u8,
-    ) -> ManagerFuture<Result<R, M::Error>>
+    async fn get_conn<'a, R>(&'a self, shared_pool: &'a SharedManagedPool<M>) -> Result<R, M::Error>
     where
         R: PoolRefBehavior<'a, M> + Unpin,
     {
-        Box::pin(async move {
-            let fut = self.pool_lock.lock::<R>(shared_pool);
-            let timeout = self.builder.wait_timeout;
+        let fut = self.pool_lock.lock::<R>(shared_pool);
+        let timeout = self.builder.wait_timeout;
 
-            let mut pool_ref = self.manager.timeout(fut, timeout).await?;
+        let mut pool_ref = self.manager.timeout(fut, timeout).await?;
 
-            if self.builder.always_check {
-                let result = self.check_conn(&mut *pool_ref).await;
-
+        if self.builder.always_check {
+            let mut retry = 0u8;
+            loop {
+                let result = self.check_conn(&mut pool_ref).await;
                 match result {
-                    Ok(Ok(_)) => {}
+                    Ok(Ok(_)) => break,
                     Ok(Err(e)) => {
                         pool_ref.take_drop();
-                        return if retry == 3 {
-                            Err(e)
+                        if retry == 3 {
+                            return Err(e);
                         } else {
                             retry += 1;
-                            self.get_conn(shared_pool, retry).await
                         };
                     }
-                    Err(timeout) => {
+                    Err(timeout_err) => {
                         pool_ref.take_drop();
-                        return Err(timeout);
+                        return Err(timeout_err);
                     }
                 }
-            };
 
-            Ok(pool_ref)
-        })
+                let fut = self.pool_lock.lock::<R>(shared_pool);
+
+                pool_ref = self.manager.timeout(fut, timeout).await?;
+            }
+        };
+
+        Ok(pool_ref)
     }
 
     #[cfg(not(feature = "no-send"))]
@@ -322,7 +280,7 @@ impl<M: Manager> Pool<M> {
     pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
         let shared_pool = &self.0;
 
-        shared_pool.get_conn(shared_pool, 0).await
+        shared_pool.get_conn(shared_pool).await
     }
 
     /// Return a `PoolRefOwned` contains a weak smart pointer of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
@@ -332,7 +290,7 @@ impl<M: Manager> Pool<M> {
     pub async fn get_owned(&self) -> Result<PoolRefOwned<M>, M::Error> {
         let shared_pool = &self.0;
 
-        shared_pool.get_conn(shared_pool, 0).await
+        shared_pool.get_conn(shared_pool).await
     }
 
     /// Run the pool with an async closure.
@@ -685,6 +643,7 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
     // helper function to spawn drop connection and spawn new ones if needed.
     // Conn<M> should be dropped in place where spawn_drop() is used.
     // ToDo: Will get unsolvable pending if the spawn is panic;
+    #[cold]
     fn spawn_drop(&self, marker: usize) {
         #[cfg(not(feature = "no-send"))]
         let opt = self.drop_conn(marker, true);
