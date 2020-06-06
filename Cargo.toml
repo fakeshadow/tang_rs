@@ -37,3 +37,9 @@ features = ["attributes", "unstable"]
 
 [dev-dependencies.smol]
 version = "0.1.10"
+
+[profile.bench]
+opt-level = 3
+debug = false
+lto = true
+debug-assertions = false

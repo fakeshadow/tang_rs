@@ -44,7 +44,7 @@ macro_rules! pool_lock {
         impl<M: Manager> PoolLock<M> {
             pub(crate) fn from_builder(builder: &Builder) -> Self {
                 Self {
-                    inner: Mutex::new(PoolInner {
+                    inner: $lock_type::new(PoolInner {
                         spawned: 0,
                         marker: 0,
                         pending: VecDeque::with_capacity(builder.max_size),

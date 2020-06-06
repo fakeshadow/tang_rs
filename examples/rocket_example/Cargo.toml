@@ -39,4 +39,3 @@ version = "0.5.3"
 
 [dependencies.tokio_postgres_tang]
 path = "../../tokio_postgres_tang"
-
