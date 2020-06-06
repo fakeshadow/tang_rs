@@ -88,6 +88,7 @@ impl<M: Manager> ManagedPool<M> {
         }
     }
 
+    #[inline]
     async fn get_conn<'a, R>(&'a self, shared_pool: &'a SharedManagedPool<M>) -> Result<R, M::Error>
     where
         R: PoolRefBehavior<'a, M> + Unpin,
