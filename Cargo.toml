@@ -6,7 +6,7 @@ edition = "2018"
 description = "A light weight asynchronous connection pool"
 keywords = ["async", "pool"]
 license = "MIT"
-exclude = ["examples/*"]
+exclude = ["examples/*", "benches/*", "tests/*"]
 repository = "https://github.com/fakeshadow/tang_rs"
 readme= "README.md"
 

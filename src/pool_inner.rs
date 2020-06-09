@@ -20,20 +20,6 @@ use crate::{
     SharedManagedPool,
 };
 
-pub(crate) struct Config {
-    min_idle: AtomicUsize,
-    max_size: AtomicUsize,
-}
-
-impl Config {
-    pub(crate) fn from_builder(builder: &Builder) -> Self {
-        Self {
-            min_idle: AtomicUsize::new(builder.min_idle),
-            max_size: AtomicUsize::new(builder.max_size),
-        }
-    }
-}
-
 macro_rules! pool_lock {
     ($lock_type: ident, $guard_type: ident, $lock_method: ident, $try_lock_method: ident $(, $opt:ident)*) => {
         pub(crate) struct PoolLock<M: Manager> {
@@ -72,6 +58,20 @@ pool_lock!(Mutex, MutexGuard, lock, try_lock, unwrap);
 
 #[cfg(feature = "no-send")]
 pool_lock!(RefCell, RefMut, borrow_mut, try_borrow_mut);
+
+pub(crate) struct Config {
+    min_idle: AtomicUsize,
+    max_size: AtomicUsize,
+}
+
+impl Config {
+    pub(crate) fn from_builder(builder: &Builder) -> Self {
+        Self {
+            min_idle: AtomicUsize::new(builder.min_idle),
+            max_size: AtomicUsize::new(builder.max_size),
+        }
+    }
+}
 
 pub(crate) struct PoolInner<M: Manager> {
     spawned: usize,
@@ -327,7 +327,7 @@ impl<M: Manager> PoolLock<M> {
         self.config.min_idle.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn get_maker(&self) -> usize {
+    pub(crate) fn marker(&self) -> usize {
         self._lock().marker()
     }
 
@@ -395,26 +395,6 @@ where
             }
         }
     }
-
-    #[inline]
-    fn try_poll_ref(&mut self) -> Option<Poll<R>> {
-        let pool_lock = self.pool_lock.expect("Future polled after finish");
-
-        if let Some(mut inner) = pool_lock._try_lock() {
-            if let Some(conn) = inner.pop_conn() {
-                self.pool_lock = None;
-
-                if let Some(wait_key) = self.wait_key {
-                    unsafe { inner.waiters_mut().remove(wait_key) };
-                    self.wait_key = None;
-                }
-
-                return Some(Poll::Ready(R::from_idle(conn, self.shared_pool)));
-            }
-        }
-
-        None
-    }
 }
 
 impl<'re, M, R> Future for PoolLockFuture<'re, M, R>
@@ -436,37 +416,52 @@ where
             }
         }
 
-        if let Some(poll) = self.try_poll_ref() {
-            return poll;
-        }
-
         let pool_lock = self.pool_lock.expect("Future polled after finish");
-        {
-            let mut inner = pool_lock._lock();
-            // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
-            match self.wait_key {
-                Some(wait_key) => {
-                    let opt = unsafe { inner.waiters_mut().get(wait_key) };
-                    // We replace the waker if we are woken and have no key in waiters or have a new context which will not wake the old waker.
-                    if opt
-                        .as_ref()
-                        .map(|waker| !waker.will_wake(cx.waker()))
-                        .unwrap_or_else(|| true)
-                    {
-                        *opt = Some(cx.waker().clone());
+
+        // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
+        match self.wait_key {
+            Some(wait_key) => {
+                // force lock if we are already in wait list
+                let mut inner = pool_lock._lock();
+
+                if let Some(conn) = inner.pop_conn() {
+                    unsafe { inner.waiters_mut().remove(wait_key) };
+                    self.wait_key = None;
+                    self.pool_lock = None;
+
+                    return Poll::Ready(R::from_idle(conn, self.shared_pool));
+                }
+
+                let opt = unsafe { inner.waiters_mut().get(wait_key) };
+                // We replace the waker if we are woken and have no waker in waiter list or have a new context which will not wake the old waker.
+                if opt
+                    .as_ref()
+                    .map(|waker| !waker.will_wake(cx.waker()))
+                    .unwrap_or_else(|| true)
+                {
+                    *opt = Some(cx.waker().clone());
+                }
+
+                // We got pending so we spawn a new connection if we have not hit the max pool size.
+                pool_lock.spawn_idle_conn(shared_pool, &mut inner);
+            }
+            None => {
+                // try to lock before we add ourselves to wait list.
+                if let Some(mut inner) = pool_lock._try_lock() {
+                    if let Some(conn) = inner.pop_conn() {
+                        self.pool_lock = None;
+                        return Poll::Ready(R::from_idle(conn, self.shared_pool));
                     }
                 }
-                None => {
-                    let wait_key = inner.waiters_mut().insert(Some(cx.waker().clone()));
-                    self.wait_key = Some(wait_key);
-                }
-            }
-            // We got pending so we spawn a new connection if we have not hit the max pool size.
-            pool_lock.spawn_idle_conn(shared_pool, &mut inner);
-        }
 
-        if let Some(poll) = self.try_poll_ref() {
-            return poll;
+                let mut inner = pool_lock._lock();
+
+                let wait_key = inner.waiters_mut().insert(Some(cx.waker().clone()));
+                self.wait_key = Some(wait_key);
+
+                // We got pending so we spawn a new connection if we have not hit the max pool size.
+                pool_lock.spawn_idle_conn(shared_pool, &mut inner);
+            }
         }
 
         Poll::Pending

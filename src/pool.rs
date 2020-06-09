@@ -1,9 +1,9 @@
-use std::fmt;
-use std::future::Future;
-use std::ops::{Deref, DerefMut};
+use core::fmt;
+use core::future::Future;
+use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "no-send")]
 use std::rc::{Rc as WrapPointer, Weak};
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(feature = "no-send"))]
 use std::sync::{Arc as WrapPointer, Weak};
 use std::time::Instant;
@@ -382,7 +382,7 @@ impl<M: Manager> Pool<M> {
     pub async fn init(&self) -> Result<(), M::Error> {
         let shared_pool = &self.0;
 
-        let marker = shared_pool.pool_lock.get_maker();
+        let marker = shared_pool.pool_lock.marker();
 
         shared_pool
             .replenish_idle_conn(shared_pool.builder.min_idle, marker)

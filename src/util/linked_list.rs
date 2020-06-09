@@ -1,5 +1,5 @@
-use std::num::NonZeroUsize;
-use std::task::Waker;
+use core::num::NonZeroUsize;
+use core::task::Waker;
 
 // This linked list come from https://github.com/async-rs/async-std/pull/370 by nbdd0121
 
@@ -65,7 +65,6 @@ impl WakerList {
         if self.head == node {
             self.head = next;
         } else {
-            // std::mem::replace(&mut (*prev).next_in_queue, next);
             (*prev).next_in_queue = next;
         }
 
@@ -73,10 +72,8 @@ impl WakerList {
         if next.is_null() {
             if !self.head.is_null() {
                 (*self.head).prev_in_queue = prev;
-                // std::mem::replace(&mut (*self.head).prev_in_queue, prev);
             }
         } else {
-            // std::mem::replace(&mut (*next).prev_in_queue, prev);
             (*next).prev_in_queue = prev;
         }
 

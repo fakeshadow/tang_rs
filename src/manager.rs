@@ -1,11 +1,11 @@
-use std::fmt::Debug;
-use std::future::Future;
-use std::pin::Pin;
+use core::fmt::Debug;
+use core::future::Future;
+use core::pin::Pin;
+use core::time::Duration;
 #[cfg(feature = "no-send")]
 use std::rc::Rc as WrapPointer;
 #[cfg(not(feature = "no-send"))]
 use std::sync::Arc as WrapPointer;
-use std::time::Duration;
 
 use crate::pool::SharedManagedPool;
 use crate::util::timeout::ManagerTimeout;
