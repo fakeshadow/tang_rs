@@ -1,16 +1,17 @@
 #[cfg(feature = "no-send")]
-use std::cell::{RefCell, RefMut};
+use core::cell::{RefCell, RefMut};
+use core::fmt;
+use core::future::Future;
+use core::marker::PhantomData;
+use core::num::NonZeroUsize;
+use core::pin::Pin;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use core::task::{Context, Poll, Waker};
+use core::time::Duration;
 use std::collections::VecDeque;
-use std::fmt;
-use std::future::Future;
-use std::marker::PhantomData;
-use std::num::NonZeroUsize;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(not(feature = "no-send"))]
 use std::sync::{Mutex, MutexGuard};
-use std::task::{Context, Poll, Waker};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::{
     builder::Builder,

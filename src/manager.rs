@@ -25,8 +25,8 @@ pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// <Manager::TimeoutError>     tokio                   ()
 ///                             async-std               std::time::Instant
 pub trait Manager: Sized + Send + Sync + 'static {
-    type Connection: Send + Unpin + 'static;
-    type Error: Send + Debug + From<Self::TimeoutError> + 'static;
+    type Connection: Unpin + 'static;
+    type Error: Debug + From<Self::TimeoutError> + 'static;
     type Timeout: Future<Output = Self::TimeoutError> + Send;
     type TimeoutError: Send + Debug + 'static;
 
