@@ -1,3 +1,9 @@
+(Jun 11, 2020)
+----------------------
+### Add
+- Enable `Pool<Manager>::clear` and `Pool<Manager>::pause` for single threaded pool.
+- `Pool<Manager>::thread_id` would return the `ThreadId` the single threaded pool runs on.
+
 (Jun 2, 2020)
 ----------------------
 ### Breaking

@@ -169,7 +169,7 @@ impl<M: Manager> PoolLock<M> {
     {
         PoolLockFuture {
             shared_pool,
-            pool_lock: Some(self),
+            pool_lock: self,
             wait_key: None,
             _r: PhantomData,
         }
@@ -177,7 +177,6 @@ impl<M: Manager> PoolLock<M> {
 
     // add pending directly to pool inner if we try to spawn new connections.
     // and return the new pending count as option to notify the Pool to replenish connections
-    #[cfg(not(feature = "no-send"))]
     pub(crate) fn decr_spawned(&self, marker: usize, should_spawn_new: bool) -> Option<usize> {
         let mut inner = self._lock();
 
@@ -187,24 +186,6 @@ impl<M: Manager> PoolLock<M> {
         let min_idle = self.min_idle();
 
         if total < min_idle && should_spawn_new && marker == inner.marker() {
-            let pending_new = min_idle - total;
-            inner.incr_pending(pending_new);
-            Some(pending_new)
-        } else {
-            None
-        }
-    }
-
-    #[cfg(feature = "no-send")]
-    pub(crate) fn decr_spawned(&self) -> Option<usize> {
-        let mut inner = self._lock();
-
-        inner._decr_spawned(1);
-
-        let total = inner.total();
-        let min_idle = self.min_idle();
-
-        if total < min_idle {
             let pending_new = min_idle - total;
             inner.incr_pending(pending_new);
             Some(pending_new)
@@ -261,12 +242,7 @@ impl<M: Manager> PoolLock<M> {
     pub(crate) fn put_back(&self, conn: IdleConn<M>) {
         let mut inner = self._lock();
 
-        #[cfg(not(feature = "no-send"))]
         let condition = inner.spawned() > self.max_size() || inner.marker() != conn.marker();
-
-        // ToDo: currently we don't enable clear function for single thread pool.
-        #[cfg(feature = "no-send")]
-        let condition = inner.spawned() > self.max_size();
 
         if condition {
             inner._decr_spawned(1);
@@ -284,12 +260,7 @@ impl<M: Manager> PoolLock<M> {
 
         inner._decr_pending(1);
 
-        #[cfg(not(feature = "no-send"))]
         let condition = inner.spawned() < self.max_size() && inner.marker() == conn.marker();
-
-        // ToDo: currently we don't enable clear function for single thread pool.
-        #[cfg(feature = "no-send")]
-        let condition = inner.spawned() < self.max_size();
 
         if condition {
             inner.push_conn(conn);
@@ -361,7 +332,7 @@ where
     R: PoolRefBehavior<'a, M>,
 {
     shared_pool: &'a SharedManagedPool<M>,
-    pool_lock: Option<&'a PoolLock<M>>,
+    pool_lock: &'a PoolLock<M>,
     wait_key: Option<NonZeroUsize>,
     _r: PhantomData<R>,
 }
@@ -384,16 +355,14 @@ where
 {
     #[cold]
     fn wake_cold(&self, wait_key: NonZeroUsize) {
-        if let Some(pool_lock) = self.pool_lock {
-            let mut inner = pool_lock._lock();
-            let wait_key = unsafe { inner.waiters_mut().remove(wait_key) };
+        let mut inner = self.pool_lock._lock();
+        let wait_key = unsafe { inner.waiters_mut().remove(wait_key) };
 
-            if wait_key.is_none() {
-                // We were awoken but didn't acquire the lock. Wake up another task.
-                let opt = inner.waiters_mut().wake_one_weak();
-                drop(inner);
-                opt.wake();
-            }
+        if wait_key.is_none() {
+            // We were awoken but didn't acquire the lock. Wake up another task.
+            let opt = inner.waiters_mut().wake_one_weak();
+            drop(inner);
+            opt.wake();
         }
     }
 }
@@ -409,15 +378,11 @@ where
         let shared_pool = self.shared_pool;
 
         // we return pending status directly if the pool is in pausing state.
-        // ToDo: currently we don't enable pause function for single thread pool.
-        #[cfg(not(feature = "no-send"))]
-        {
-            if !shared_pool.is_running() {
-                return Poll::Pending;
-            }
+        if !shared_pool.is_running() {
+            return Poll::Pending;
         }
 
-        let pool_lock = self.pool_lock.expect("Future polled after finish");
+        let pool_lock = self.pool_lock;
 
         // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
         match self.wait_key {
@@ -428,7 +393,6 @@ where
                 if let Some(conn) = inner.pop_conn() {
                     unsafe { inner.waiters_mut().remove(wait_key) };
                     self.wait_key = None;
-                    self.pool_lock = None;
 
                     return Poll::Ready(R::from_idle(conn, self.shared_pool));
                 }
@@ -450,7 +414,6 @@ where
                 // try to lock before we add ourselves to wait list.
                 if let Some(mut inner) = pool_lock._try_lock() {
                     if let Some(conn) = inner.pop_conn() {
-                        self.pool_lock = None;
                         return Poll::Ready(R::from_idle(conn, self.shared_pool));
                     }
                 }

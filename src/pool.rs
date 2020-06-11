@@ -2,11 +2,14 @@ use core::fmt;
 use core::future::Future;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "no-send")]
-use std::rc::{Rc as WrapPointer, Weak};
 #[cfg(not(feature = "no-send"))]
 use std::sync::{Arc as WrapPointer, Weak};
 use std::time::Instant;
+#[cfg(feature = "no-send")]
+use std::{
+    rc::{Rc as WrapPointer, Weak},
+    thread::{self, ThreadId},
+};
 
 use crate::builder::Builder;
 use crate::manager::Manager;
@@ -42,7 +45,6 @@ impl<M: Manager> IdleConn<M> {
         }
     }
 
-    #[cfg(not(feature = "no-send"))]
     #[inline]
     pub(crate) fn marker(&self) -> usize {
         self.conn.marker
@@ -127,18 +129,10 @@ impl<M: Manager> ManagedPool<M> {
         Ok(pool_ref)
     }
 
-    #[cfg(not(feature = "no-send"))]
     fn drop_conn(&self, marker: usize, should_spawn_new: bool) -> Option<usize> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
         self.pool_lock.decr_spawned(marker, should_spawn_new)
-    }
-
-    #[cfg(feature = "no-send")]
-    fn drop_conn(&self) -> Option<usize> {
-        //  We might need to spin up more connections to maintain the idle limit.
-        //  e.g. if we hit connection lifetime limits
-        self.pool_lock.decr_spawned()
     }
 
     pub(crate) async fn add_idle_conn(&self, marker: usize) -> Result<(), M::Error> {
@@ -253,23 +247,31 @@ pub type SharedManagedPool<M> = WrapPointer<ManagedPool<M>>;
 
 pub type WeakSharedManagedPool<M> = Weak<ManagedPool<M>>;
 
-pub struct Pool<M: Manager>(SharedManagedPool<M>);
+pub struct Pool<M: Manager> {
+    pool: SharedManagedPool<M>,
+    #[cfg(feature = "no-send")]
+    id: ThreadId,
+}
 
 impl<M: Manager> Clone for Pool<M> {
     fn clone(&self) -> Self {
-        Pool(self.0.clone())
+        Self {
+            pool: self.pool.clone(),
+            #[cfg(feature = "no-send")]
+            id: self.id,
+        }
     }
 }
 
 impl<M: Manager> fmt::Debug for Pool<M> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_fmt(format_args!("Pool({:p})", self.0))
+        f.write_fmt(format_args!("Pool({:p})", self.pool))
     }
 }
 
 impl<M: Manager> Drop for Pool<M> {
     fn drop(&mut self) {
-        self.0.manager.on_stop();
+        self.pool.manager.on_stop();
     }
 }
 
@@ -279,7 +281,7 @@ impl<M: Manager> Pool<M> {
     /// The `PoolRef` should be dropped asap when you finish the use of it. Hold it in scope would prevent the connection from pushed back to pool.
     #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
-        let shared_pool = &self.0;
+        let shared_pool = &self.pool;
 
         shared_pool.get_conn(shared_pool).await
     }
@@ -289,7 +291,7 @@ impl<M: Manager> Pool<M> {
     /// You can move `PoolRefOwned` to async blocks and across await point. But the performance is considerably worse than `Pool::get`.
     #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub async fn get_owned(&self) -> Result<PoolRefOwned<M>, M::Error> {
-        let shared_pool = &self.0;
+        let shared_pool = &self.pool;
 
         shared_pool.get_conn(shared_pool).await
     }
@@ -324,18 +326,18 @@ impl<M: Manager> Pool<M> {
     /// - default scheduled works (They would skip at least one iteration if the schedule time come across with the time period the pool is paused).
     /// - put back connection. (connection will be dropped instead.)
     pub fn pause(&self) {
-        self.0.if_running(false);
+        self.pool.if_running(false);
     }
 
     /// restart the pool.
     // ToDo: for now pool would lose accuracy for min_idle after restart. It would recover after certain amount of requests to pool.
     pub fn resume(&self) {
-        self.0.if_running(true);
+        self.pool.if_running(true);
     }
 
     /// check if the pool is running.
     pub fn running(&self) -> bool {
-        self.0.is_running()
+        self.pool.is_running()
     }
 
     /// Clear the pool.
@@ -346,7 +348,7 @@ impl<M: Manager> Pool<M> {
     ///
     /// All `PoolRef' and 'PoolRefOwned` outside of pool before the clear happen would be destroyed when trying to return it's connection to pool.
     pub fn clear(&self) {
-        self.0.pool_lock.clear()
+        self.pool.pool_lock.clear()
     }
 
     /// manually initialize pool. this is usually called when the `Pool` is built with `build_uninitialized`
@@ -380,7 +382,7 @@ impl<M: Manager> Pool<M> {
     /// ```
     #[must_use = "futures do nothing unless you `.await` or poll them"]
     pub async fn init(&self) -> Result<(), M::Error> {
-        let shared_pool = &self.0;
+        let shared_pool = &self.pool;
 
         let marker = shared_pool.pool_lock.marker();
 
@@ -398,7 +400,7 @@ impl<M: Manager> Pool<M> {
     ///
     /// No actual check is used for new `max_size`. Be ware not to pass a size smaller than `min_idle`.
     pub fn set_max_size(&self, size: usize) {
-        self.0.pool_lock.set_max_size(size);
+        self.pool.pool_lock.set_max_size(size);
     }
 
     /// Change the min idle size of pool.
@@ -406,22 +408,32 @@ impl<M: Manager> Pool<M> {
     ///
     /// No actual check is used for new `min_idle`. Be ware not to pass a size bigger than `max_size`.
     pub fn set_min_idle(&self, size: usize) {
-        self.0.pool_lock.set_min_idle(size);
+        self.pool.pool_lock.set_min_idle(size);
     }
 
     /// expose `Manager` to public
     pub fn get_manager(&self) -> &M {
-        &self.0.manager
+        &self.pool.manager
     }
 
     /// Return a state of the pool inner. This call will block the thread and wait for lock.
     pub fn state(&self) -> State {
-        self.0.pool_lock.state()
+        self.pool.pool_lock.state()
+    }
+
+    /// Return the thread id the pool is running on.(This is only useful when running the pool on single threads)
+    #[cfg(feature = "no-send")]
+    pub fn thread_id(&self) -> ThreadId {
+        self.id
     }
 
     pub(crate) fn new(builder: Builder, manager: M) -> Self {
         let pool = ManagedPool::new(builder, manager);
-        Pool(WrapPointer::new(pool))
+        Pool {
+            pool: WrapPointer::new(pool),
+            #[cfg(feature = "no-send")]
+            id: thread::current().id(),
+        }
     }
 }
 
@@ -508,9 +520,9 @@ impl<M: Manager> PoolRefOwned<M> {
     }
 }
 
-pub(crate) trait PoolRefBehavior<'a, M: Manager>: Sized
+pub(crate) trait PoolRefBehavior<'a, M: Manager>
 where
-    Self: DerefMut<Target = M::Connection>,
+    Self: DerefMut<Target = M::Connection> + Sized,
 {
     fn from_idle(conn: IdleConn<M>, shared_pool: &'a SharedManagedPool<M>) -> Self;
 
@@ -614,14 +626,10 @@ trait DropAndSpawn<M: Manager> {
 impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
     #[inline]
     fn drop_pool_ref(&self, conn: &mut Option<Conn<M>>, marker: Option<usize>) {
-        // ToDo: currently we don't enable pause function for single thread pool.
-        #[cfg(not(feature = "no-send"))]
-        {
-            if !self.is_running() {
-                // marker here doesn't matter as should_spawn_new would reject new connection generation
-                self.drop_conn(0, false);
-                return;
-            }
+        if !self.is_running() {
+            // marker here doesn't matter as should_spawn_new would reject new connection generation
+            self.drop_conn(0, false);
+            return;
         }
 
         let mut conn = match conn.take() {
@@ -646,10 +654,7 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
     // ToDo: Will get unsolvable pending if the spawn is panic;
     #[cold]
     fn spawn_drop(&self, marker: usize) {
-        #[cfg(not(feature = "no-send"))]
         let opt = self.drop_conn(marker, true);
-        #[cfg(feature = "no-send")]
-        let opt = self.drop_conn();
 
         if let Some(pending) = opt {
             let shared_clone = self.clone();
