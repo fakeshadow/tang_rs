@@ -153,7 +153,7 @@ impl<M: Manager> ManagedPool<M> {
             })?;
 
         self.pool_lock
-            .put_back_incr_spawned(IdleConn::new(conn, marker));
+            .put_back_inc_spawned(IdleConn::new(conn, marker));
 
         Ok(())
     }

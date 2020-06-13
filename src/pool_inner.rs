@@ -1,7 +1,3 @@
-#[cfg(not(feature = "no-send"))]
-use crate::util::spin_pool::{SpinPool, SpinPoolAPI, SpinPoolGuard};
-#[cfg(feature = "no-send")]
-use core::cell::{RefCell, RefMut};
 use core::fmt;
 use core::future::Future;
 use core::marker::PhantomData;
@@ -11,11 +7,16 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 use std::collections::VecDeque;
-#[cfg(not(feature = "no-send"))]
-use std::sync::{Mutex, MutexGuard};
-
 use std::time::Instant;
 
+#[cfg(not(feature = "no-send"))]
+use {
+    crate::util::spin_pool::{PoolAPI, SpinPool, SpinPoolGuard},
+    std::sync::{Mutex, MutexGuard},
+};
+
+#[cfg(feature = "no-send")]
+use crate::util::cell_pool::{CellPool, CellPoolGuard};
 use crate::{
     builder::Builder,
     manager::Manager,
@@ -44,12 +45,7 @@ macro_rules! pool_lock {
         impl<M: Manager> PoolLock<M> {
             pub(crate) fn from_builder(builder: &Builder) -> Self {
                 Self {
-                    inner: $pool_lock_type::new(PoolInner {
-                        spawned: 0,
-                        marker: 0,
-                        pending: VecDeque::with_capacity(builder.max_size),
-                        conn: VecDeque::with_capacity(builder.max_size),
-                    }),
+                    inner: $pool_lock_type::new(PoolInner::with_capacity(builder.max_size)),
                     waiters: $waiter_lock_type::new(WakerList::new()),
                     config: Config::from_builder(builder),
                 }
@@ -87,19 +83,17 @@ pool_lock!(
 
 #[cfg(feature = "no-send")]
 pool_lock!(
-    RefCell,
-    RefMut,
-    borrow_mut,
-    try_borrow_mut,
-    RefCell,
-    RefMut,
-    borrow_mut
+    CellPool,
+    CellPoolGuard,
+    lock,
+    try_lock,
+    CellPool,
+    CellPoolGuard,
+    lock
 );
 
 #[cfg(not(feature = "no-send"))]
-impl<M: Manager> SpinPoolAPI for PoolInner<M> {
-    type Item = IdleConn<M>;
-
+impl<M: Manager> PoolAPI for PoolInner<M> {
     fn is_empty(&self) -> bool {
         self.conn.is_empty()
     }
@@ -127,6 +121,15 @@ pub(crate) struct PoolInner<M: Manager> {
 }
 
 impl<M: Manager> PoolInner<M> {
+    fn with_capacity(size: usize) -> Self {
+        Self {
+            spawned: 0,
+            marker: 0,
+            pending: VecDeque::with_capacity(size),
+            conn: VecDeque::with_capacity(size),
+        }
+    }
+
     #[inline]
     fn marker(&self) -> usize {
         self.marker
@@ -293,7 +296,7 @@ impl<M: Manager> PoolLock<M> {
         self.lock_waiter().wake_one_weak().wake();
     }
 
-    pub(crate) fn put_back_incr_spawned(&self, conn: IdleConn<M>) {
+    pub(crate) fn put_back_inc_spawned(&self, conn: IdleConn<M>) {
         let mut inner = self.lock_inner();
 
         inner._dec_pending(1);

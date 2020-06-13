@@ -1,4 +1,7 @@
+use core::marker::PhantomData;
+use core::mem::replace;
 use core::num::NonZeroUsize;
+use core::ptr::null_mut;
 use core::task::Waker;
 
 // This linked list come from https://github.com/async-rs/async-std/pull/370 by nbdd0121
@@ -22,17 +25,15 @@ unsafe impl Sync for WakerList {}
 impl WakerList {
     /// Create a new empty `WakerList`
     pub(crate) fn new() -> Self {
-        Self {
-            head: std::ptr::null_mut(),
-        }
+        Self { head: null_mut() }
     }
 
     /// Insert a waker to the back of the list, and return its key.
     pub(crate) fn insert(&mut self, waker: Option<Waker>) -> NonZeroUsize {
         let node = Box::into_raw(Box::new(WakerNode {
             waker,
-            next_in_queue: std::ptr::null_mut(),
-            prev_in_queue: std::ptr::null_mut(),
+            next_in_queue: null_mut(),
+            prev_in_queue: null_mut(),
         }));
 
         if self.head.is_null() {
@@ -42,7 +43,7 @@ impl WakerList {
             self.head = node;
         } else {
             unsafe {
-                let prev = std::mem::replace(&mut (*self.head).prev_in_queue, node);
+                let prev = replace(&mut (*self.head).prev_in_queue, node);
                 (*prev).next_in_queue = node;
                 (*node).prev_in_queue = prev;
             }
@@ -95,10 +96,10 @@ impl WakerList {
     //    }
 
     /// Get an iterator over all wakers.
-    pub(crate) fn iter_mut(&mut self) -> Iter<'_> {
+    fn iter_mut(&mut self) -> Iter<'_> {
         Iter {
             ptr: self.head,
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -115,7 +116,7 @@ impl WakerList {
 
 pub(crate) struct Iter<'a> {
     ptr: *mut WakerNode,
-    _marker: std::marker::PhantomData<&'a ()>,
+    _marker: PhantomData<&'a ()>,
 }
 
 impl<'a> Iterator for Iter<'a> {
@@ -126,7 +127,7 @@ impl<'a> Iterator for Iter<'a> {
             return None;
         }
         let next = unsafe { (*self.ptr).next_in_queue };
-        let ptr = std::mem::replace(&mut self.ptr, next);
+        let ptr = replace(&mut self.ptr, next);
         Some(unsafe { &mut (*ptr).waker })
     }
 }
