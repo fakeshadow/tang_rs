@@ -71,7 +71,7 @@ async fn main() {
         .mount("/test", routes![index, index2])
         .manage(pool)
         .manage(pool_redis)
-        .serve()
+        .launch()
         .await;
 }
 

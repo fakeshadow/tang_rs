@@ -132,7 +132,7 @@ impl<M: Manager> ManagedPool<M> {
     fn drop_conn(&self, marker: usize, should_spawn_new: bool) -> Option<usize> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
-        self.pool_lock.decr_spawned(marker, should_spawn_new)
+        self.pool_lock.dec_spawned(marker, should_spawn_new)
     }
 
     pub(crate) async fn add_idle_conn(&self, marker: usize) -> Result<(), M::Error> {

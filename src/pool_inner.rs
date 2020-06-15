@@ -9,19 +9,18 @@ use core::time::Duration;
 use std::collections::VecDeque;
 use std::time::Instant;
 
-#[cfg(not(feature = "no-send"))]
-use {
-    crate::util::spin_pool::{PoolAPI, SpinPool, SpinPoolGuard},
-    std::sync::{Mutex, MutexGuard},
-};
-
 #[cfg(feature = "no-send")]
 use crate::util::cell_pool::{CellPool, CellPoolGuard};
+use crate::util::linked_list::{
+    linked_list_lock::{WakerListGuard, WakerListLock},
+    WakerList,
+};
+#[cfg(not(feature = "no-send"))]
+use crate::util::spin_pool::{PoolAPI, SpinPool, SpinPoolGuard};
 use crate::{
     builder::Builder,
     manager::Manager,
     pool::{IdleConn, PoolRefBehavior},
-    util::linked_list::WakerList,
     SharedManagedPool,
 };
 
@@ -75,10 +74,9 @@ pool_lock!(
     SpinPoolGuard,
     lock,
     try_lock,
-    Mutex,
-    MutexGuard,
-    lock,
-    unwrap
+    WakerListLock,
+    WakerListGuard,
+    lock
 );
 
 #[cfg(feature = "no-send")]
@@ -87,8 +85,8 @@ pool_lock!(
     CellPoolGuard,
     lock,
     try_lock,
-    CellPool,
-    CellPoolGuard,
+    WakerListLock,
+    WakerListGuard,
     lock
 );
 
@@ -153,7 +151,7 @@ impl<M: Manager> PoolInner<M> {
         self.spawned += count;
     }
 
-    fn _decr_spawned(&mut self, count: usize) {
+    fn _dec_spawned(&mut self, count: usize) {
         self.spawned -= count;
     }
 
@@ -219,10 +217,10 @@ impl<M: Manager> PoolLock<M> {
 
     // add pending directly to pool inner if we try to spawn new connections.
     // and return the new pending count as option to notify the Pool to replenish connections
-    pub(crate) fn decr_spawned(&self, marker: usize, should_spawn_new: bool) -> Option<usize> {
+    pub(crate) fn dec_spawned(&self, marker: usize, should_spawn_new: bool) -> Option<usize> {
         let mut inner = self.lock_inner();
 
-        inner._decr_spawned(1);
+        inner._dec_spawned(1);
 
         let total = inner.total();
         let min_idle = self.min_idle();
@@ -262,7 +260,7 @@ impl<M: Manager> PoolLock<M> {
             let diff = len - inner.conn_len();
 
             if diff > 0 {
-                inner._decr_spawned(diff);
+                inner._dec_spawned(diff);
             }
 
             let total_now = inner.total();
@@ -287,7 +285,7 @@ impl<M: Manager> PoolLock<M> {
         let condition = inner.spawned() > self.max_size() || inner.marker() != conn.marker();
 
         if condition {
-            inner._decr_spawned(1);
+            inner._dec_spawned(1);
         } else {
             inner.push_conn(conn);
         }
@@ -315,7 +313,7 @@ impl<M: Manager> PoolLock<M> {
     pub(crate) fn clear(&self) {
         let mut inner = self.lock_inner();
         let count = inner.conn_len();
-        inner._decr_spawned(count);
+        inner._dec_spawned(count);
         inner.incr_marker();
 
         let pool_size = self.max_size();
@@ -437,7 +435,7 @@ where
                     unsafe { pool_lock.lock_waiter().remove(wait_key) };
                     self.wait_key = None;
 
-                    return Poll::Ready(R::from_idle(conn, self.shared_pool));
+                    return Poll::Ready(R::from_idle(conn, shared_pool));
                 }
 
                 // We got pending so we spawn a new connection if we have not hit the max pool size.
@@ -460,17 +458,14 @@ where
                 {
                     // Safety: try_lock_2 only obtain lock when pool is not empty so the unwrap is safe.
                     if let Ok(mut guard) = pool_lock.inner.try_lock_2() {
-                        return Poll::Ready(R::from_idle(
-                            guard.pop_conn().unwrap(),
-                            self.shared_pool,
-                        ));
+                        return Poll::Ready(R::from_idle(guard.pop_conn().unwrap(), shared_pool));
                     }
                 }
                 #[cfg(feature = "no-send")]
                 {
                     if let Some(mut guard) = pool_lock.try_lock_inner() {
                         if let Some(conn) = guard.pop_conn() {
-                            return Poll::Ready(R::from_idle(conn, self.shared_pool));
+                            return Poll::Ready(R::from_idle(conn, shared_pool));
                         }
                     }
                 }

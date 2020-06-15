@@ -14,6 +14,7 @@ pub struct SpinPool<T> {
     inner: UnsafeCell<T>,
 }
 
+#[allow(clippy::identity_op)]
 const LOCKED: usize = 1 << 0;
 const FREE: usize = 1 << 1;
 const EMPTY: usize = 1 << 2 | FREE;
@@ -28,7 +29,7 @@ impl<T> SpinPool<T> {
     }
 }
 
-/// SpinPoolAPI is a helper trait for interacting with the SpinPool.
+/// PoolAPI is a helper trait for interacting with the SpinPool.
 pub trait PoolAPI {
     fn is_empty(&self) -> bool;
 }
@@ -109,7 +110,7 @@ unsafe impl<T: Send> Send for SpinPool<T> {}
 unsafe impl<T: Send> Sync for SpinPool<T> {}
 
 /// A simple backoff (`crossbeam-util::backoff::BackOff` with yield limit disabled.)
-struct Backoff {
+pub(super) struct Backoff {
     cycle: Cell<u8>,
 }
 
@@ -117,14 +118,14 @@ const SPIN_LIMIT: u8 = 6;
 
 impl Backoff {
     #[inline]
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             cycle: Cell::new(0),
         }
     }
 
     #[inline]
-    pub fn snooze(&self) {
+    pub(super) fn snooze(&self) {
         if self.cycle.get() <= SPIN_LIMIT {
             for _ in 0..1 << self.cycle.get() {
                 spin_loop_hint();
