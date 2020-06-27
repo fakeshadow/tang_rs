@@ -24,6 +24,8 @@ use crate::{
     SharedManagedPool,
 };
 
+// PoolLock contains two locks(one for pooled objects and one for the waiters queue).
+// By default they are spin locks and other locks can be used with macro impl.
 macro_rules! pool_lock {
     (
         $pool_lock_type: ident,
@@ -111,6 +113,7 @@ impl Config {
     }
 }
 
+// pool inner holds all the objects and associate info
 pub(crate) struct PoolInner<M: Manager> {
     spawned: usize,
     marker: usize,
@@ -416,7 +419,7 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let shared_pool = self.shared_pool;
 
-        // we return pending status directly if the pool is in pausing state.
+        // we return pending directly if the pool is in pausing state.
         if !shared_pool.is_running() {
             return Poll::Pending;
         }

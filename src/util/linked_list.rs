@@ -135,8 +135,8 @@ impl<'a> Iterator for Iter<'a> {
 /// a helper trait for interacting with WakerListLock
 pub(crate) trait ListAPI {
     fn head_as_usize(&self) -> usize;
-    fn list(&self) -> &WakerList;
-    fn list_mut(&mut self) -> &mut WakerList;
+    fn as_ref(&self) -> &WakerList;
+    fn as_mut(&mut self) -> &mut WakerList;
     fn from_usize(value: usize) -> Self;
 }
 
@@ -145,11 +145,11 @@ impl ListAPI for WakerList {
         self.head as usize
     }
 
-    fn list(&self) -> &WakerList {
+    fn as_ref(&self) -> &WakerList {
         &self
     }
 
-    fn list_mut(&mut self) -> &mut WakerList {
+    fn as_mut(&mut self) -> &mut WakerList {
         self
     }
 
@@ -208,13 +208,13 @@ pub(crate) mod linked_list_lock {
         type Target = WakerList;
 
         fn deref(&self) -> &WakerList {
-            self.list.list()
+            self.list.as_ref()
         }
     }
 
     impl<'a, T: ListAPI> DerefMut for WakerListGuard<'a, T> {
         fn deref_mut(&mut self) -> &mut WakerList {
-            self.list.list_mut()
+            self.list.as_mut()
         }
     }
 
@@ -261,7 +261,7 @@ pub(crate) mod linked_list_lock {
                     list: T::from_usize(value),
                 };
             } else {
-                panic!("WakerListLock already locked by others")
+                panic!("WakerListLock already locked by others");
             }
         }
     }

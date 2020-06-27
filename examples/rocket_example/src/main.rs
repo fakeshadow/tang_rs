@@ -25,7 +25,7 @@ const IDS: &[u32] = &[
     1, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
 ];
 
-#[tokio::main]
+#[rocket::main]
 async fn main() {
     let db_url = "postgres://postgres:123@localhost/test";
 

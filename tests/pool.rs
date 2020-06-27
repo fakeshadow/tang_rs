@@ -3,16 +3,11 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use async_std::{
-    prelude::*,
-    stream::{interval, Interval},
-    task::{self, sleep},
-};
-use smol::Timer;
 use tang_rs::{
     Builder, GarbageCollect, Manager, ManagerFuture, ManagerInterval, ManagerTimeout, Pool,
     PoolRef, ScheduleReaping, SharedManagedPool,
 };
+use tokio::time::{delay_for, interval, Delay, Interval};
 
 macro_rules! test_pool {
     ($valid_condition: expr, $broken_condition: expr) => {
@@ -20,8 +15,8 @@ macro_rules! test_pool {
 
         struct TestPoolError;
 
-        impl From<Instant> for TestPoolError {
-            fn from(_: Instant) -> Self {
+        impl From<()> for TestPoolError {
+            fn from(_: ()) -> Self {
                 TestPoolError
             }
         }
@@ -36,14 +31,14 @@ macro_rules! test_pool {
 
         impl ManagerInterval for TestPoolManager {
             type Interval = Interval;
-            type Tick = Option<()>;
+            type Tick = tokio::time::Instant;
 
             fn interval(dur: Duration) -> Self::Interval {
                 interval(dur)
             }
 
             fn tick(tick: &mut Self::Interval) -> ManagerFuture<'_, Self::Tick> {
-                Box::pin(tick.next())
+                Box::pin(tick.tick())
             }
         }
 
@@ -54,8 +49,8 @@ macro_rules! test_pool {
         impl Manager for TestPoolManager {
             type Connection = usize;
             type Error = TestPoolError;
-            type Timeout = Timer;
-            type TimeoutError = Instant;
+            type Timeout = Delay;
+            type TimeoutError = ();
 
             fn connect(&self) -> ManagerFuture<'_, Result<Self::Connection, Self::Error>> {
                 Box::pin(async move { Ok(self.0.fetch_add(1, Ordering::SeqCst)) })
@@ -86,7 +81,7 @@ macro_rules! test_pool {
             where
                 Fut: Future<Output = ()> + Send + 'static,
             {
-                task::spawn(fut);
+                tokio::spawn(fut);
             }
 
             fn timeout<Fut: Future>(
@@ -94,7 +89,7 @@ macro_rules! test_pool {
                 fut: Fut,
                 dur: Duration,
             ) -> ManagerTimeout<Fut, Self::Timeout> {
-                ManagerTimeout::new(fut, Timer::after(dur))
+                ManagerTimeout::new(fut, delay_for(dur))
             }
 
             fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
@@ -105,7 +100,7 @@ macro_rules! test_pool {
     };
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn limit() {
     test_pool!(2, 4);
 
@@ -143,7 +138,7 @@ async fn limit() {
     pool_state(&pool, 12, 12, 0);
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn valid_closed() {
     test_pool!(2, 4);
 
@@ -162,15 +157,15 @@ async fn valid_closed() {
     let mut interval = interval(Duration::from_secs(1));
 
     let conn0 = pool.get().await;
-    interval.next().await;
+    interval.tick().await;
     assert_eq!(true, conn0.is_ok());
 
     let conn1 = pool.get().await;
-    interval.next().await;
+    interval.tick().await;
     assert_eq!(true, conn1.is_ok());
 
     let conn2 = pool.get().await;
-    interval.next().await;
+    interval.tick().await;
     assert_eq!(true, conn2.is_ok());
 
     assert_eq!(true, *(conn0.unwrap()) == 0);
@@ -183,12 +178,12 @@ async fn valid_closed() {
         assert_eq!(true, num == 0 || num == 2 || num == 6 || num == 8);
     }
 
-    interval.next().await;
+    interval.tick().await;
 
     pool_state(&pool, 4, 4, 0);
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn retry_limit() {
     test_pool!(5, 1);
 
@@ -218,24 +213,24 @@ async fn retry_limit() {
     let mut interval = interval(Duration::from_secs(1));
 
     let conn0 = pool.get().await;
-    interval.next().await;
+    interval.tick().await;
     let conn1 = pool.get().await;
-    interval.next().await;
+    interval.tick().await;
     let conn2 = pool.get().await;
-    interval.next().await;
+    interval.tick().await;
 
     f(&mut errs, conn0);
     f(&mut errs, conn1);
     f(&mut errs, conn2);
 
-    assert_eq!(true, errs == 1);
+    assert_eq!(errs, 1);
 
-    interval.next().await;
+    interval.tick().await;
 
     pool_state(&pool, 4, 4, 0);
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn idle_timeout() {
     test_pool!(2, 4);
 
@@ -262,12 +257,12 @@ async fn idle_timeout() {
 
     pool_state(&pool, 4, 4, 0);
 
-    sleep(Duration::from_secs(6)).await;
+    delay_for(Duration::from_secs(6)).await;
 
     pool_state(&pool, 2, 2, 0);
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn max_lifetime() {
     test_pool!(2, 4);
 
@@ -294,12 +289,12 @@ async fn max_lifetime() {
 
     pool_state(&pool, 4, 4, 0);
 
-    sleep(Duration::from_secs(6)).await;
+    delay_for(Duration::from_secs(6)).await;
 
     pool_state(&pool, 2, 2, 0);
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn pause() {
     test_pool!(1, 100);
 
@@ -357,12 +352,12 @@ async fn pause() {
 
     pool.resume();
 
-    task::sleep(Duration::from_secs(3)).await;
+    delay_for(Duration::from_secs(3)).await;
 
     pool_state(&pool, 8, 8, 0);
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn set_max() {
     test_pool!(1, 100);
 
@@ -389,7 +384,7 @@ async fn set_max() {
     pool_state(&pool, 7, 7, 0);
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn set_min() {
     test_pool!(1, 100);
 
@@ -406,12 +401,12 @@ async fn set_min() {
 
     pool.set_min_idle(7);
 
-    sleep(Duration::from_secs(3)).await;
+    delay_for(Duration::from_secs(3)).await;
 
     pool_state(&pool, 7, 7, 0);
 }
 
-#[async_std::test]
+#[tokio::test]
 async fn clear() {
     test_pool!(1, 100);
 
