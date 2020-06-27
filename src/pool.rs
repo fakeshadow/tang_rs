@@ -132,7 +132,7 @@ impl<M: Manager> ManagedPool<M> {
     fn drop_conn(&self, marker: usize, should_spawn_new: bool) -> Option<usize> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
-        self.pool_lock.decr_spawned(marker, should_spawn_new)
+        self.pool_lock.dec_spawned(marker, should_spawn_new)
     }
 
     pub(crate) async fn add_idle_conn(&self, marker: usize) -> Result<(), M::Error> {
@@ -144,16 +144,16 @@ impl<M: Manager> ManagedPool<M> {
             .timeout(fut, timeout)
             .await
             .map_err(|e| {
-                self.pool_lock.decr_pending(1);
+                self.pool_lock.dec_pending(1);
                 e
             })?
             .map_err(|e| {
-                self.pool_lock.decr_pending(1);
+                self.pool_lock.dec_pending(1);
                 e
             })?;
 
         self.pool_lock
-            .put_back_incr_spawned(IdleConn::new(conn, marker));
+            .put_back_inc_spawned(IdleConn::new(conn, marker));
 
         Ok(())
     }
@@ -179,7 +179,7 @@ impl<M: Manager> ManagedPool<M> {
                 // (the pending of i is already dropped in add_connection method)
                 let count = pending_count - i - 1;
                 if count > 0 {
-                    self.pool_lock.decr_pending(count);
+                    self.pool_lock.dec_pending(count);
                 };
                 e
             })?;
@@ -215,7 +215,7 @@ impl<M: Manager> ManagedPool<M> {
     pub async fn reap_idle_conn(&self) -> Result<(), M::Error> {
         let now = Instant::now();
 
-        let pending_new = self.pool_lock.try_drop_conns(|conn| {
+        let pending_new = self.pool_lock.try_drop_conn(|conn| {
             let mut should_drop = false;
             if let Some(timeout) = self.builder.idle_timeout {
                 should_drop |= now >= conn.idle_start + timeout;
@@ -234,7 +234,7 @@ impl<M: Manager> ManagedPool<M> {
 
     pub fn garbage_collect(&self) {
         self.pool_lock
-            .drop_pendings(|pending| pending.should_remove(self.builder.connection_timeout));
+            .drop_pending(|pending| pending.should_remove(self.builder.connection_timeout));
     }
 
     /// expose `Builder` to public

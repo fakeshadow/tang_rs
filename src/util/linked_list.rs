@@ -1,4 +1,7 @@
+use core::marker::PhantomData;
+use core::mem::replace;
 use core::num::NonZeroUsize;
+use core::ptr::null_mut;
 use core::task::Waker;
 
 // This linked list come from https://github.com/async-rs/async-std/pull/370 by nbdd0121
@@ -22,17 +25,15 @@ unsafe impl Sync for WakerList {}
 impl WakerList {
     /// Create a new empty `WakerList`
     pub(crate) fn new() -> Self {
-        Self {
-            head: std::ptr::null_mut(),
-        }
+        Self { head: null_mut() }
     }
 
     /// Insert a waker to the back of the list, and return its key.
     pub(crate) fn insert(&mut self, waker: Option<Waker>) -> NonZeroUsize {
         let node = Box::into_raw(Box::new(WakerNode {
             waker,
-            next_in_queue: std::ptr::null_mut(),
-            prev_in_queue: std::ptr::null_mut(),
+            next_in_queue: null_mut(),
+            prev_in_queue: null_mut(),
         }));
 
         if self.head.is_null() {
@@ -42,7 +43,7 @@ impl WakerList {
             self.head = node;
         } else {
             unsafe {
-                let prev = std::mem::replace(&mut (*self.head).prev_in_queue, node);
+                let prev = replace(&mut (*self.head).prev_in_queue, node);
                 (*prev).next_in_queue = node;
                 (*node).prev_in_queue = prev;
             }
@@ -95,10 +96,10 @@ impl WakerList {
     //    }
 
     /// Get an iterator over all wakers.
-    pub(crate) fn iter_mut(&mut self) -> Iter<'_> {
+    fn iter_mut(&mut self) -> Iter<'_> {
         Iter {
             ptr: self.head,
-            _marker: std::marker::PhantomData,
+            _marker: PhantomData,
         }
     }
 
@@ -115,7 +116,7 @@ impl WakerList {
 
 pub(crate) struct Iter<'a> {
     ptr: *mut WakerNode,
-    _marker: std::marker::PhantomData<&'a ()>,
+    _marker: PhantomData<&'a ()>,
 }
 
 impl<'a> Iterator for Iter<'a> {
@@ -126,7 +127,142 @@ impl<'a> Iterator for Iter<'a> {
             return None;
         }
         let next = unsafe { (*self.ptr).next_in_queue };
-        let ptr = std::mem::replace(&mut self.ptr, next);
+        let ptr = replace(&mut self.ptr, next);
         Some(unsafe { &mut (*ptr).waker })
+    }
+}
+
+/// a helper trait for interacting with WakerListLock
+pub(crate) trait ListAPI {
+    fn head_as_usize(&self) -> usize;
+    fn as_ref(&self) -> &WakerList;
+    fn as_mut(&mut self) -> &mut WakerList;
+    fn from_usize(value: usize) -> Self;
+}
+
+impl ListAPI for WakerList {
+    fn head_as_usize(&self) -> usize {
+        self.head as usize
+    }
+
+    fn as_ref(&self) -> &WakerList {
+        &self
+    }
+
+    fn as_mut(&mut self) -> &mut WakerList {
+        self
+    }
+
+    fn from_usize(value: usize) -> Self {
+        WakerList {
+            head: value as *mut WakerNode,
+        }
+    }
+}
+
+pub(crate) mod linked_list_lock {
+    #[cfg(feature = "no-send")]
+    use core::cell::Cell;
+    use core::marker::PhantomData;
+    use core::ops::{Deref, DerefMut};
+
+    #[cfg(not(feature = "no-send"))]
+    use {
+        super::super::spin_pool::Backoff,
+        core::sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::{ListAPI, WakerList};
+
+    /// `WakerListLock` is a spin lock by default. It stores the head of the LinkedList
+    /// In `no-send` feature it is a wrapper of `Cell` where the thread will panic if concurrent access happen
+    macro_rules! waker_list_lock {
+        ($lock_type: ty) => {
+            pub(crate) struct WakerListLock<T: ListAPI> {
+                head: $lock_type,
+                _p: PhantomData<T>,
+            }
+
+            pub(crate) struct WakerListGuard<'a, T: ListAPI> {
+                head: &'a $lock_type,
+                list: T,
+            }
+
+            impl<T: ListAPI> WakerListLock<T> {
+                pub(crate) fn new(list: T) -> Self {
+                    Self {
+                        head: <$lock_type>::new(list.head_as_usize()),
+                        _p: PhantomData,
+                    }
+                }
+            }
+        };
+    }
+
+    #[cfg(not(feature = "no-send"))]
+    waker_list_lock!(AtomicUsize);
+    #[cfg(feature = "no-send")]
+    waker_list_lock!(Cell<usize>);
+
+    impl<'a, T: ListAPI> Deref for WakerListGuard<'a, T> {
+        type Target = WakerList;
+
+        fn deref(&self) -> &WakerList {
+            self.list.as_ref()
+        }
+    }
+
+    impl<'a, T: ListAPI> DerefMut for WakerListGuard<'a, T> {
+        fn deref_mut(&mut self) -> &mut WakerList {
+            self.list.as_mut()
+        }
+    }
+
+    #[cfg(not(feature = "no-send"))]
+    impl<'a, T: ListAPI> Drop for WakerListGuard<'a, T> {
+        fn drop(&mut self) {
+            self.head
+                .store(self.list.head_as_usize(), Ordering::Release);
+        }
+    }
+
+    #[cfg(feature = "no-send")]
+    impl<'a, T: ListAPI> Drop for WakerListGuard<'a, T> {
+        fn drop(&mut self) {
+            self.head.set(self.list.head_as_usize());
+        }
+    }
+
+    #[cfg(not(feature = "no-send"))]
+    impl<T: ListAPI> WakerListLock<T> {
+        pub(crate) fn lock(&self) -> WakerListGuard<'_, T> {
+            let backoff = Backoff::new();
+            loop {
+                let value = self.head.swap(1, Ordering::Acquire);
+                if value != 1 {
+                    return WakerListGuard {
+                        head: &self.head,
+                        list: T::from_usize(value),
+                    };
+                }
+                backoff.snooze();
+            }
+        }
+    }
+
+    #[cfg(feature = "no-send")]
+    impl<T: ListAPI> WakerListLock<T> {
+        pub(crate) fn lock(&self) -> WakerListGuard<'_, T> {
+            let value = self.head.replace(1);
+
+            if value != 1 {
+                return WakerListGuard {
+                    head: &self.head,
+                    list: T::from_usize(value),
+                };
+            } else {
+                panic!("WakerListLock already locked by others");
+            }
+        }
     }
 }

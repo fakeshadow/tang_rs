@@ -1,6 +1,6 @@
 [package]
 name = "tang-rs"
-version = "0.1.3"
+version = "0.2.0"
 authors = ["fakeshadow <24548779@qq.com>"]
 edition = "2018"
 description = "A light weight asynchronous connection pool"
@@ -37,6 +37,10 @@ features = ["attributes", "unstable"]
 
 [dev-dependencies.smol]
 version = "0.1.10"
+
+[dev-dependencies.tokio]
+version = "0.2.21"
+features = ["full"]
 
 [profile.bench]
 opt-level = 3

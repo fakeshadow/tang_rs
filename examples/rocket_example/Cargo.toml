@@ -30,10 +30,6 @@ version = "1.0.101"
 [dependencies.serde_json]
 version = "1.0.40"
 
-[dependencies.tokio]
-version = "0.2.16"
-features = ["full"]
-
 [dependencies.tokio-postgres]
 version = "0.5.3"
 
