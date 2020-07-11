@@ -31,6 +31,9 @@ members = [
     "mongodb_tang"
 ]
 
+[dependencies]
+cache-padded = ""
+
 [dev-dependencies.async-std]
 version = "1.6.0"
 features = ["attributes", "unstable"]

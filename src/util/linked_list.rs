@@ -105,11 +105,11 @@ impl WakerList {
 
     /// Wake the first waker in the list, and convert it to `None`. This function is named `weak` as
     /// nothing is performed when the first waker is waken already.
-    pub(crate) fn wake_one_weak(&mut self) -> Option<Waker> {
-        if let Some(opt_waker) = self.iter_mut().next() {
-            opt_waker.take()
-        } else {
-            None
+    pub(crate) fn wake_one_weak(&mut self) {
+        for opt in self.iter_mut() {
+            if let Some(waker) = opt.take() {
+                return waker.wake();
+            }
         }
     }
 }
