@@ -16,7 +16,7 @@ default-features = false
 optional = true
 
 [dependencies.async-std]
-version = "1.6.0"
+version = "1.6.2"
 default-features = false
 optional = true
 
@@ -38,6 +38,6 @@ version = "0.5.4"
 optional = true
 
 [dependencies.tokio]
-version = "0.2.20"
+version = "0.2.21"
 default-features = false
 optional = true

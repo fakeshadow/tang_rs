@@ -15,7 +15,6 @@ use crate::util::linked_list::{
     linked_list_lock::{WakerListGuard, WakerListLock},
     WakerList,
 };
-use crate::util::lock_free_pool::{LockFreePool, PopError};
 #[cfg(not(feature = "no-send"))]
 use crate::util::spin_pool::{PoolAPI, SpinPool, SpinPoolGuard};
 use crate::{
@@ -25,106 +24,73 @@ use crate::{
     SharedManagedPool,
 };
 
-// // PoolLock contains two locks(one for pooled objects and one for the waiters queue).
-// // By default they are spin locks and other locks can be used with macro impl.
-// macro_rules! pool_lock {
-//     (
-//         $pool_lock_type: ident,
-//         $pool_guard_type: ident,
-//         $pool_lock_method: ident,
-//         $pool_try_lock_method: ident,
-//         $waiter_lock_type: ident,
-//         $waiter_guard_type: ident,
-//         $waiter_lock_method: ident
-//         $(, $opt:ident)*
-//     ) => {
-//         pub(crate) struct PoolLock<M: Manager> {
-//             inner: $pool_lock_type<PoolInner<M>>,
-//             waiters: $waiter_lock_type<WakerList>,
-//             config: Config,
-//         }
-//
-//         impl<M: Manager> PoolLock<M> {
-//             pub(crate) fn from_builder(builder: &Builder) -> Self {
-//                 Self {
-//                     inner: $pool_lock_type::new(PoolInner::with_capacity(builder.max_size)),
-//                     waiters: $waiter_lock_type::new(WakerList::new()),
-//                     config: Config::from_builder(builder),
-//                 }
-//             }
-//
-//             #[inline]
-//             pub(crate) fn lock_inner(&self) -> $pool_guard_type<'_, PoolInner<M>> {
-//                 self.inner.$pool_lock_method()
-//             }
-//
-//             #[inline]
-//             pub(crate) fn try_lock_inner(&self) -> Option<$pool_guard_type<'_, PoolInner<M>>> {
-//                 self.inner.$pool_try_lock_method().ok()
-//             }
-//
-//             #[inline]
-//             pub(crate) fn lock_waiter(&self) -> $waiter_guard_type<'_, WakerList> {
-//                 self.waiters.$waiter_lock_method()$(.$opt())*
-//             }
-//         }
-//     };
-// }
-//
-// #[cfg(not(feature = "no-send"))]
-// pool_lock!(
-//     SpinPool,
-//     SpinPoolGuard,
-//     lock,
-//     try_lock,
-//     WakerListLock,
-//     WakerListGuard,
-//     lock
-// );
-//
-// #[cfg(feature = "no-send")]
-// pool_lock!(
-//     CellPool,
-//     CellPoolGuard,
-//     lock,
-//     try_lock,
-//     WakerListLock,
-//     WakerListGuard,
-//     lock
-// );
-
-pub(crate) struct PoolLock<M: Manager> {
-    bounded: LockFreePool<IdleConn<M>>,
-    inner: SpinPool<PoolInner<M>>,
-    waiters: WakerListLock<WakerList>,
-    config: Config,
-}
-
-impl<M: Manager> PoolLock<M> {
-    pub(crate) fn from_builder(builder: &Builder) -> Self {
-        Self {
-            bounded: LockFreePool::new(builder.max_size),
-            inner: SpinPool::new(PoolInner::with_capacity(builder.max_size)),
-            waiters: WakerListLock::new(WakerList::new()),
-            config: Config::from_builder(builder),
+// PoolLock contains two locks(one for pooled objects and one for the waiters queue).
+// By default they are spin locks and other locks can be used with macro impl.
+macro_rules! pool_lock {
+    (
+        $pool_lock_type: ident,
+        $pool_guard_type: ident,
+        $pool_lock_method: ident,
+        $pool_try_lock_method: ident,
+        $waiter_lock_type: ident,
+        $waiter_guard_type: ident,
+        $waiter_lock_method: ident
+        $(, $opt:ident)*
+    ) => {
+        pub(crate) struct PoolLock<M: Manager> {
+            inner: $pool_lock_type<PoolInner<M>>,
+            waiters: $waiter_lock_type<WakerList>,
+            config: Config,
         }
-    }
 
-    #[inline]
-    pub(crate) fn lock_inner(&self) -> SpinPoolGuard<'_, PoolInner<M>> {
-        self.inner.lock()
-    }
+        impl<M: Manager> PoolLock<M> {
+            pub(crate) fn from_builder(builder: &Builder) -> Self {
+                Self {
+                    inner: $pool_lock_type::new(PoolInner::with_capacity(builder.max_size)),
+                    waiters: $waiter_lock_type::new(WakerList::new()),
+                    config: Config::from_builder(builder),
+                }
+            }
 
-    #[inline]
-    pub(crate) fn try_lock_inner(&self) -> Option<SpinPoolGuard<'_, PoolInner<M>>> {
-        self.inner.try_lock().ok()
-    }
+            #[inline]
+            pub(crate) fn lock_inner(&self) -> $pool_guard_type<'_, PoolInner<M>> {
+                self.inner.$pool_lock_method()
+            }
 
-    #[inline]
-    pub(crate) fn lock_waiter(&self) -> WakerListGuard<'_, WakerList> {
-        self.waiters.lock()
-    }
+            #[inline]
+            pub(crate) fn try_lock_inner(&self) -> Option<$pool_guard_type<'_, PoolInner<M>>> {
+                self.inner.$pool_try_lock_method().ok()
+            }
+
+            #[inline]
+            pub(crate) fn lock_waiter(&self) -> $waiter_guard_type<'_, WakerList> {
+                self.waiters.$waiter_lock_method()$(.$opt())*
+            }
+        }
+    };
 }
+
+#[cfg(not(feature = "no-send"))]
+pool_lock!(
+    SpinPool,
+    SpinPoolGuard,
+    lock,
+    try_lock,
+    WakerListLock,
+    WakerListGuard,
+    lock
+);
+
+#[cfg(feature = "no-send")]
+pool_lock!(
+    CellPool,
+    CellPoolGuard,
+    lock,
+    try_lock,
+    WakerListLock,
+    WakerListGuard,
+    lock
+);
 
 #[cfg(not(feature = "no-send"))]
 impl<M: Manager> PoolAPI for PoolInner<M> {
@@ -317,13 +283,34 @@ impl<M: Manager> PoolLock<M> {
 
     #[inline]
     pub(crate) fn put_back(&self, conn: IdleConn<M>) {
-        let _ = self.bounded.push_back(conn);
-        self.lock_waiter().wake_one_weak();
+        let mut inner = self.lock_inner();
+
+        let condition = inner.spawned() > self.max_size() || inner.marker() != conn.marker();
+
+        if condition {
+            inner._dec_spawned(1);
+        } else {
+            inner.push_conn(conn);
+        }
+
+        drop(inner);
+        self.lock_waiter().wake_one_weak().wake();
     }
 
     pub(crate) fn put_back_inc_spawned(&self, conn: IdleConn<M>) {
-        let _ = self.bounded.push_new(conn);
-        self.lock_waiter().wake_one_weak();
+        let mut inner = self.lock_inner();
+
+        inner._dec_pending(1);
+
+        let condition = inner.spawned() < self.max_size() && inner.marker() == conn.marker();
+
+        if condition {
+            inner.push_conn(conn);
+            inner._incr_spawned(1);
+        }
+
+        drop(inner);
+        self.lock_waiter().wake_one_weak().wake();
     }
 
     pub(crate) fn clear(&self) {
@@ -358,21 +345,25 @@ impl<M: Manager> PoolLock<M> {
     }
 
     pub(crate) fn state(&self) -> State {
-        let (idle_connections, connections, pending_connections) = self.bounded.state();
+        let mut inner = self.lock_inner();
 
         State {
-            connections,
-            idle_connections,
-            pending_connections,
+            connections: inner.spawned(),
+            idle_connections: inner.conn_len(),
+            pending_connections: inner.pending_mut().iter().cloned().collect(),
         }
     }
 
     #[inline]
-    fn spawn_idle_conn(&self, shared_pool: &SharedManagedPool<M>) {
-        let shared_clone = shared_pool.clone();
-        shared_pool.spawn(async move {
-            let _ = shared_clone.add_idle_conn(0).await;
-        });
+    fn spawn_idle_conn(&self, shared_pool: &SharedManagedPool<M>, inner: &mut PoolInner<M>) {
+        if inner.total() < self.max_size() {
+            let marker = inner.marker();
+            let shared_clone = shared_pool.clone();
+            shared_pool.spawn(async move {
+                let _ = shared_clone.add_idle_conn(marker).await;
+            });
+            inner.inc_pending(1);
+        }
     }
 }
 
@@ -411,7 +402,9 @@ where
 
         if wait_key.is_none() {
             // We were awoken but didn't acquire the lock. Wake up another task.
-            waiters.wake_one_weak();
+            let opt = waiters.wake_one_weak();
+            drop(waiters);
+            opt.wake();
         }
     }
 }
@@ -433,46 +426,61 @@ where
 
         let pool_lock = self.pool_lock;
 
-        match pool_lock.bounded.pop() {
-            Ok(conn) => {
-                // remove self from waiter list
-                if let Some(wait_key) = self.wait_key {
+        // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
+        match self.wait_key {
+            Some(wait_key) => {
+
+                // force lock if we are already in wait list
+                let mut inner = pool_lock.lock_inner();
+
+                if let Some(conn) = inner.pop_conn() {
+                    drop(inner);
+
                     unsafe { pool_lock.lock_waiter().remove(wait_key) };
                     self.wait_key = None;
+
+                    return Poll::Ready(R::from_idle(conn, shared_pool));
                 }
 
-                Poll::Ready(R::from_idle(conn, shared_pool))
+                // We got pending so we spawn a new connection if we have not hit the max pool size.
+                pool_lock.spawn_idle_conn(shared_pool, &mut inner);
+                drop(inner);
+
+                let mut waiters = pool_lock.lock_waiter();
+                let opt = unsafe { waiters.get(wait_key) };
+                // We replace the waker if we are woken and have no waker in waiter list or have a new context which will not wake the old waker.
+                if opt
+                    .as_ref()
+                    .map(|waker| !waker.will_wake(cx.waker()))
+                    .unwrap_or_else(|| true)
+                {
+                    *opt = Some(cx.waker().clone());
+                }
             }
-            Err(e) => {
-                // spawn according to error.
-                if PopError::SpawnNow == e {
-                    pool_lock.spawn_idle_conn(shared_pool);
-                }
-
-                // insert or update wait key.
-                match self.wait_key {
-                    None => {
-                        let wait_key = pool_lock.lock_waiter().insert(Some(cx.waker().clone()));
-
-                        self.wait_key = Some(wait_key);
-                    }
-                    Some(wait_key) => {
-                        let mut waiters = pool_lock.lock_waiter();
-                        let opt = unsafe { waiters.get(wait_key) };
-                        // We replace the waker if we are woken and have no waker in waiter list or have a new context which will not wake the old waker.
-                        if opt
-                            .as_ref()
-                            .map(|waker| !waker.will_wake(cx.waker()))
-                            .unwrap_or_else(|| true)
+            None => {
+                    #[cfg(not(feature = "no-send"))]
                         {
-                            *opt = Some(cx.waker().clone());
+                            // Safety: try_lock_2 only obtain lock when pool is not empty so the unwrap is safe.
+                            if let Ok(mut guard) = pool_lock.inner.try_lock_2() {
+                                return Poll::Ready(R::from_idle(guard.pop_conn().unwrap(), shared_pool));
+                            }
                         }
-                    }
-                }
+                    #[cfg(feature = "no-send")]
+                        {
+                            if let Some(mut guard) = pool_lock.try_lock_inner() {
+                                if let Some(conn) = guard.pop_conn() {
+                                    return Poll::Ready(R::from_idle(conn, shared_pool));
+                                }
+                            }
+                        }
 
-                Poll::Pending
+                let wait_key = pool_lock.lock_waiter().insert(Some(cx.waker().clone()));
+
+                self.wait_key = Some(wait_key);
             }
         }
+
+        Poll::Pending
     }
 }
 
@@ -485,7 +493,7 @@ unsafe impl<M: Manager + Send> Sync for PoolLock<M> {}
 pub struct State {
     pub connections: usize,
     pub idle_connections: usize,
-    pub pending_connections: usize,
+    pub pending_connections: Vec<Pending>,
 }
 
 impl fmt::Debug for State {

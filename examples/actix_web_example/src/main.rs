@@ -46,10 +46,8 @@ async fn main() -> std::io::Result<()> {
     let mgr = RedisManager::new("redis://127.0.0.1");
     let pool_redis = Builder::new()
         .always_check(false)
-        // .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
-        // .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
-        .idle_timeout(None)
-        .max_lifetime(None)
+        .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
+        .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
         .reaper_rate(std::time::Duration::from_secs(5))
         .min_idle(0)
         .max_size(24)
