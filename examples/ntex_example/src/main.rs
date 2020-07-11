@@ -48,7 +48,6 @@ async fn main() -> std::io::Result<()> {
                     .always_check(false)
                     .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
                     .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
-                    .reaper_rate(std::time::Duration::from_secs(5))
                     .min_idle(2)
                     .max_size(2)
                     .build(mgr)

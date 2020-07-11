@@ -132,7 +132,7 @@ impl<M: Manager> ManagedPool<M> {
     fn drop_conn(&self, marker: usize, should_spawn_new: bool) -> Option<usize> {
         //  We might need to spin up more connections to maintain the idle limit.
         //  e.g. if we hit connection lifetime limits
-        self.pool_lock.dec_spawned(marker, should_spawn_new)
+        self.pool_lock.dec_active(marker, should_spawn_new)
     }
 
     pub(crate) async fn add_idle_conn(&self, marker: usize) -> Result<(), M::Error> {
@@ -210,31 +210,6 @@ impl<M: Manager> ManagedPool<M> {
         Fut: Future<Output = ()> + 'static,
     {
         self.manager.spawn(fut);
-    }
-
-    pub async fn reap_idle_conn(&self) -> Result<(), M::Error> {
-        let now = Instant::now();
-
-        let pending_new = self.pool_lock.try_drop_conn(|conn| {
-            let mut should_drop = false;
-            if let Some(timeout) = self.builder.idle_timeout {
-                should_drop |= now >= conn.idle_start + timeout;
-            }
-            if let Some(lifetime) = self.builder.max_lifetime {
-                should_drop |= now >= conn.conn.birth + lifetime;
-            }
-            should_drop
-        });
-
-        match pending_new {
-            Some((pending_new, marker)) => self.replenish_idle_conn(pending_new, marker).await,
-            None => Ok(()),
-        }
-    }
-
-    pub fn garbage_collect(&self) {
-        self.pool_lock
-            .drop_pending(|pending| pending.should_remove(self.builder.connection_timeout));
     }
 
     /// expose `Builder` to public
@@ -385,10 +360,11 @@ impl<M: Manager> Pool<M> {
         let shared_pool = &self.pool;
 
         let marker = shared_pool.pool_lock.marker();
+        let count = shared_pool.builder.min_idle;
 
-        shared_pool
-            .replenish_idle_conn(shared_pool.builder.min_idle, marker)
-            .await?;
+        shared_pool.pool_lock.inc_pending(count);
+
+        shared_pool.replenish_idle_conn(count, marker).await?;
 
         shared_pool.manager.on_start(shared_pool);
 
@@ -621,6 +597,8 @@ trait DropAndSpawn<M: Manager> {
     fn drop_pool_ref(&self, conn: &mut Option<Conn<M>>, marker: Option<usize>);
 
     fn spawn_drop(&self, marker: usize);
+
+    fn lifetime_check(&self, conn: &Conn<M>) -> bool;
 }
 
 impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
@@ -642,7 +620,9 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
         };
 
         let is_closed = self.manager.is_closed(&mut conn.conn);
-        if is_closed {
+        let lifetime_check = self.lifetime_check(&conn);
+
+        if is_closed || lifetime_check {
             self.spawn_drop(conn.marker);
         } else {
             self.pool_lock.put_back(conn.into());
@@ -662,5 +642,14 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
                 let _ = shared_clone.replenish_idle_conn(pending, marker).await;
             });
         }
+    }
+
+    #[inline]
+    fn lifetime_check(&self, conn: &Conn<M>) -> bool {
+        if let Some(time) = self.builder.max_lifetime {
+            return Instant::now().duration_since(conn.birth) > time;
+        }
+
+        false
     }
 }

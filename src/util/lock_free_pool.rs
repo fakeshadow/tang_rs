@@ -5,7 +5,7 @@
 /// - add `active_pending` field for tracking the active and pending item count of queue
 ///   (Both inside and outside of queue for a given moment)
 /// - add `shift` field for comparing `active_pending` with `cap`.
-/// - `one_lap` serves as the `mark_bit` of both `head`/`tail` and `active_pending`.
+/// - `one_lap` serves as the bitwise operator of both `head`/`tail` and `active_pending`.
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::marker::PhantomData;
@@ -25,7 +25,7 @@ struct Slot<T> {
 }
 
 /// A bounded queue.
-pub struct LockFreePool<T> {
+pub(crate) struct PoolInner<T> {
     /// The current count of active T and pending T of this queue.
     ///
     /// They may or may not in the queue currently.
@@ -35,18 +35,18 @@ pub struct LockFreePool<T> {
 
     /// The head of the queue.
     ///
-    /// This value is a "stamp" consisting of an index into the buffer, a mark bit, and a lap, but
+    /// This value is a "stamp" consisting of an index into the buffer and a lap, but
     /// packed into a single `usize`. The lower bits represent the index, while the upper bits
-    /// represent the lap. The mark bit in the head is always zero.
+    /// represent the lap.
     ///
     /// Values are popped from the head of the queue.
     head: CachePadded<AtomicUsize>,
 
     /// The tail of the queue.
     ///
-    /// This value is a "stamp" consisting of an index into the buffer, a mark bit, and a lap, but
+    /// This value is a "stamp" consisting of an index into the buffer and a lap, but
     /// packed into a single `usize`. The lower bits represent the index, while the upper bits
-    /// represent the lap. The mark bit indicates that the queue is closed.
+    /// represent the lap.
     ///
     /// Values are pushed into the tail of the queue.
     tail: CachePadded<AtomicUsize>,
@@ -63,13 +63,13 @@ pub struct LockFreePool<T> {
     /// We use this to shift the active_pending into/from an actual active count.
     shift: usize,
 
-    /// Indicates that dropping an `Bounded<T>` may drop values of type `T`.
+    /// Indicates that dropping an `PoolInner<T>` may drop values of type `T`.
     _marker: PhantomData<T>,
 }
 
-impl<T> LockFreePool<T> {
+impl<T> PoolInner<T> {
     /// Creates a new bounded queue.
-    pub fn new(cap: usize) -> LockFreePool<T> {
+    pub(crate) fn new(cap: usize) -> PoolInner<T> {
         assert!(cap > 0, "capacity must be positive");
 
         // Head is initialized to `{ lap: 0, index: 0 }`.
@@ -98,7 +98,7 @@ impl<T> LockFreePool<T> {
         let one_lap = (cap + 1).next_power_of_two();
         let shift = (one_lap - 1).count_ones() as usize;
 
-        LockFreePool {
+        PoolInner {
             active_pending: CachePadded::new(AtomicUsize::new(0)),
             buffer,
             cap,
@@ -111,50 +111,48 @@ impl<T> LockFreePool<T> {
     }
 
     /// Attempts to push a new item into the queue.
-    pub fn push_new(&self, value: T) -> Result<(), PushError> {
+    pub(crate) fn push_new(&self, value: T) -> Result<(), PushError> {
         match self.push_back(value) {
             Ok(()) => {
                 // push success we increment active count and decrement pending count both by 1.
-                let mut active_pending = self.active_pending.load(Ordering::Relaxed);
-                loop {
-                    let active_pending_new = active_pending + self.one_lap - 1;
-
-                    match self.active_pending.compare_exchange_weak(
-                        active_pending,
-                        active_pending_new,
-                        Ordering::SeqCst,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => break,
-                        Err(acp) => {
-                            active_pending = acp;
-                        }
-                    }
-                }
+                self.active_pending
+                    .fetch_add(self.one_lap - 1, Ordering::Relaxed);
 
                 Ok(())
             }
             Err(e) => {
                 // push failed for some reason and we just decrement pending count.
-                self.active_pending.fetch_sub(1, Ordering::SeqCst);
+                self.active_pending.fetch_sub(1, Ordering::Relaxed);
                 Err(e)
             }
         }
     }
 
     /// *. NOTE: Whoever take the ownership of `PopError::SpawnNow` is responsible to call
-    /// `Bounded::notify_dec_pending` if it failed to spawn a new item for queue.
-    pub fn notify_dec_pending(&self) {
-        self.active_pending.fetch_sub(1, Ordering::SeqCst);
+    /// `PoolInner::dec_pending` if it failed to spawn a new item for queue.
+    pub(crate) fn dec_pending(&self, count: usize) {
+        self.active_pending.fetch_sub(count, Ordering::SeqCst);
     }
 
-    pub fn notify_dec_active(&self) {
-        self.active_pending
-            .fetch_sub(self.one_lap, Ordering::SeqCst);
+    pub(crate) fn inc_pending(&self, count: usize) {
+        self.active_pending.fetch_add(count, Ordering::SeqCst);
+    }
+
+    // would return old active + pending count
+    pub(crate) fn dec_active(&self, count: usize) -> usize {
+        let active_pending = self
+            .active_pending
+            .fetch_sub(self.one_lap * count, Ordering::SeqCst);
+
+        let one_lap = self.one_lap - 1;
+        let pending = active_pending & one_lap;
+        let active = (active_pending & !one_lap) >> self.shift;
+
+        active + pending
     }
 
     /// Attempts to push a returning item into the queue.
-    pub fn push_back(&self, value: T) -> Result<(), PushError> {
+    pub(crate) fn push_back(&self, value: T) -> Result<(), PushError> {
         let mut tail = self.tail.load(Ordering::Relaxed);
 
         loop {
@@ -222,9 +220,9 @@ impl<T> LockFreePool<T> {
     /// `PopError::SpawnNow` to notify the caller it's time to spawn new item for the queue.
     ///
     /// *. NOTE: Whoever take the ownership of `PopError::SpawnNow` is responsible for spawn the
-    /// new item and call `Bounded::push_new()` to insert the new item.
-    /// (or call `Bounded::notify_dec_pending` if it failed to do so.)
-    pub fn pop(&self) -> Result<T, PopError> {
+    /// new item and call `PoolInner::push_new` to insert the new item.
+    /// (or call `PoolInner::dec_pending` if it failed to do so.)
+    pub(crate) fn pop(&self) -> Result<T, PopError> {
         self._pop().map_err(|e| {
             // read the active pending
             let mut active_pending = self.active_pending.load(Ordering::Relaxed);
@@ -238,11 +236,9 @@ impl<T> LockFreePool<T> {
                     break;
                 } else {
                     // otherwise we increment pending count and try to write.
-                    let new_active_pending = active_pending + 1;
-
                     match self.active_pending.compare_exchange_weak(
                         active_pending,
-                        new_active_pending,
+                        active_pending + 1,
                         Ordering::SeqCst,
                         Ordering::Relaxed,
                     ) {
@@ -321,7 +317,7 @@ impl<T> LockFreePool<T> {
     }
 
     /// Returns the number of items in the queue.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         loop {
             // Load the tail, then load the head.
             let tail = self.tail.load(Ordering::SeqCst);
@@ -345,9 +341,9 @@ impl<T> LockFreePool<T> {
         }
     }
 
-    /// Returns `true` if the queue is full.
-    pub fn state(&self) -> (usize, usize, usize) {
-        let active_pending = self.active_pending.load(Ordering::SeqCst);
+    /// Returns items in queue, active and pending count in tuple
+    pub(crate) fn state(&self) -> (usize, usize, usize) {
+        let active_pending = self.active_pending.load(Ordering::Relaxed);
         let len = self.len();
         let pending = active_pending & (self.one_lap - 1);
         let active = (active_pending & !(self.one_lap - 1)) >> self.shift;
@@ -356,7 +352,7 @@ impl<T> LockFreePool<T> {
     }
 }
 
-impl<T> Drop for LockFreePool<T> {
+impl<T> Drop for PoolInner<T> {
     fn drop(&mut self) {
         // Get the index of the head.
         let hix = self.head.load(Ordering::Relaxed) & (self.one_lap - 1);
@@ -387,14 +383,14 @@ impl<T> Drop for LockFreePool<T> {
 
 /// Error which occurs when popping from an empty queue.
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub enum PopError {
+pub(crate) enum PopError {
     /// The queue is empty but not closed.
     Empty,
 
     /// A new T must be spawned now.
     ///
     /// *. Whoever get hold of SpawnNow error must take responsibility of spawn new T and call
-    /// `Bounded::push_spawn`(Even when the spawn failed)
+    /// `PoolInner::push_spawn`(Or `PoolInner::dec_pending` if it fails at spawning)
     SpawnNow,
 }
 
@@ -420,12 +416,9 @@ impl fmt::Display for PopError {
 
 /// Error which occurs when pushing into a full or closed queue.
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub enum PushError {
+pub(crate) enum PushError {
     /// The queue is full but not closed.
     Full,
-
-    /// The queue is closed.
-    Closed,
 }
 
 impl error::Error for PushError {}
@@ -434,7 +427,6 @@ impl fmt::Debug for PushError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PushError::Full => f.debug_tuple("Full").finish(),
-            PushError::Closed => f.debug_tuple("Closed").finish(),
         }
     }
 }
@@ -443,7 +435,6 @@ impl fmt::Display for PushError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PushError::Full => write!(f, "Full"),
-            PushError::Closed => write!(f, "Closed"),
         }
     }
 }

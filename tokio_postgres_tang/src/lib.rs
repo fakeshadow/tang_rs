@@ -94,10 +94,7 @@ use tokio_postgres::{
 };
 
 pub use tang_rs::{Builder, Pool, PoolRef, PoolRefOwned};
-use tang_rs::{
-    GarbageCollect, Manager, ManagerFuture, ManagerInterval, ManagerTimeout, ScheduleReaping,
-    SharedManagedPool,
-};
+use tang_rs::{Manager, ManagerFuture, ManagerTimeout};
 #[cfg(feature = "with-async-std")]
 use {
     async_postgres::{
@@ -161,63 +158,6 @@ where
             .insert(alias.into(), (query, types).into());
         self
     }
-}
-
-macro_rules! manager_interval {
-    ($interval_type: path, $interval_fn: path, $tick_type: path, $tick_method: ident) => {
-        impl<Tls> ManagerInterval for PostgresManager<Tls>
-        where
-            Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
-            Tls::Stream: Send,
-            Tls::TlsConnect: Send,
-            <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
-        {
-            type Interval = $interval_type;
-            type Tick = $tick_type;
-
-            fn interval(dur: Duration) -> Self::Interval {
-                $interval_fn(dur)
-            }
-
-            fn tick(tick: &mut Self::Interval) -> ManagerFuture<'_, Self::Tick> {
-                Box::pin(tick.$tick_method())
-            }
-        }
-    };
-}
-
-#[cfg(not(feature = "with-async-std"))]
-manager_interval!(
-    tokio::time::Interval,
-    tokio::time::interval,
-    tokio::time::Instant,
-    tick
-);
-
-#[cfg(feature = "with-async-std")]
-manager_interval!(
-    async_std::stream::Interval,
-    async_std::stream::interval,
-    Option<()>,
-    next
-);
-
-impl<Tls> ScheduleReaping for PostgresManager<Tls>
-where
-    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
-    Tls::Stream: Send,
-    Tls::TlsConnect: Send,
-    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
-{
-}
-
-impl<Tls> GarbageCollect for PostgresManager<Tls>
-where
-    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
-    Tls::Stream: Send,
-    Tls::TlsConnect: Send,
-    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
-{
 }
 
 macro_rules! manager {
@@ -309,11 +249,6 @@ macro_rules! manager {
                 dur: Duration,
             ) -> ManagerTimeout<Fut, Self::Timeout> {
                 ManagerTimeout::new(fut, $delay_fn(dur))
-            }
-
-            fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
-                self.schedule_reaping(shared_pool);
-                self.garbage_collect(shared_pool);
             }
         }
     };

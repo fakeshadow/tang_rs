@@ -133,7 +133,7 @@
 //!```
 
 pub use builder::Builder;
-pub use manager::{GarbageCollect, Manager, ManagerFuture, ManagerInterval, ScheduleReaping};
+pub use manager::{Manager, ManagerFuture};
 pub use pool::{Pool, PoolRef, PoolRefOwned, SharedManagedPool};
 pub use util::timeout::ManagerTimeout;
 

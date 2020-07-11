@@ -3,6 +3,9 @@ use core::mem::replace;
 use core::num::NonZeroUsize;
 use core::ptr::null_mut;
 use core::task::Waker;
+use std::cell::Cell;
+use std::sync::atomic::spin_loop_hint;
+use std::thread::yield_now;
 
 // This linked list come from https://github.com/async-rs/async-std/pull/370 by nbdd0121
 
@@ -90,11 +93,6 @@ impl WakerList {
         &mut (*(key.get() as *mut WakerNode)).waker
     }
 
-    //    /// Check if this list is empty.
-    //    pub(crate) fn is_empty(&self) -> bool {
-    //        self.head.is_null()
-    //    }
-
     /// Get an iterator over all wakers.
     fn iter_mut(&mut self) -> Iter<'_> {
         Iter {
@@ -103,9 +101,8 @@ impl WakerList {
         }
     }
 
-    /// Wake the first waker in the list, and convert it to `None`. This function is named `weak` as
-    /// nothing is performed when the first waker is waken already.
-    pub(crate) fn wake_one_weak(&mut self) {
+    /// Take the first not `None` waker in the list and wake it.
+    pub(crate) fn wake_one(&mut self) {
         for opt in self.iter_mut() {
             if let Some(waker) = opt.take() {
                 return waker.wake();
@@ -168,7 +165,7 @@ pub(crate) mod linked_list_lock {
 
     #[cfg(not(feature = "no-send"))]
     use {
-        super::super::spin_pool::Backoff,
+        super::Backoff,
         core::sync::atomic::{AtomicUsize, Ordering},
     };
 
@@ -264,5 +261,34 @@ pub(crate) mod linked_list_lock {
                 panic!("WakerListLock already locked by others");
             }
         }
+    }
+}
+
+/// A simple backoff (`crossbeam-util::backoff::BackOff` with yield limit disabled.)
+struct Backoff {
+    cycle: Cell<u8>,
+}
+
+const SPIN_LIMIT: u8 = 6;
+
+impl Backoff {
+    #[inline]
+    pub(super) fn new() -> Self {
+        Self {
+            cycle: Cell::new(0),
+        }
+    }
+
+    #[inline]
+    pub(super) fn snooze(&self) {
+        if self.cycle.get() <= SPIN_LIMIT {
+            for _ in 0..1 << self.cycle.get() {
+                spin_loop_hint();
+            }
+        } else {
+            return yield_now();
+        }
+
+        self.cycle.set(self.cycle.get() + 1);
     }
 }

@@ -44,8 +44,8 @@ async fn main() {
     // build postgres pool
     let pool = Builder::new()
         .always_check(false)
-        .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
-        .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+        .idle_timeout(None)
+        .max_lifetime(None)
         .reaper_rate(std::time::Duration::from_secs(5))
         .min_idle(1)
         .max_size(24)
@@ -58,10 +58,10 @@ async fn main() {
 
     let pool_redis = Builder::new()
         .always_check(false)
-        .idle_timeout(Some(std::time::Duration::from_secs(60)))
-        .max_lifetime(Some(std::time::Duration::from_secs(2 * 60)))
+        .idle_timeout(None)
+        .max_lifetime(None)
         .reaper_rate(std::time::Duration::from_secs(15))
-        .min_idle(1)
+        .min_idle(0)
         .max_size(24)
         .build(mgr)
         .await

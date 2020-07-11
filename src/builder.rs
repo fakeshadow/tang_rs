@@ -7,12 +7,10 @@ pub struct Builder {
     pub(crate) max_size: usize,
     pub(crate) min_idle: usize,
     pub(crate) always_check: bool,
-    pub(crate) use_gc: bool,
     pub(crate) max_lifetime: Option<Duration>,
     pub(crate) idle_timeout: Option<Duration>,
     pub(crate) connection_timeout: Duration,
     pub(crate) wait_timeout: Duration,
-    pub(crate) reaper_rate: Duration,
 }
 
 impl Default for Builder {
@@ -21,12 +19,10 @@ impl Default for Builder {
             max_size: 10,
             min_idle: 1,
             always_check: true,
-            use_gc: false,
             max_lifetime: Some(Duration::from_secs(30 * 60)),
             idle_timeout: Some(Duration::from_secs(10 * 60)),
             connection_timeout: Duration::from_secs(10),
             wait_timeout: Duration::from_secs(20),
-            reaper_rate: Duration::from_secs(15),
         }
     }
 }
@@ -56,16 +52,6 @@ impl Builder {
         self
     }
 
-    /// If true, the pending connections that last for too long will be removed.( 6 times the `connection_timeout` duration)
-    ///
-    /// This is a placeholder feature. it works fine but in most cases it's not necessary or useful.
-    ///
-    /// Defaults to false.
-    pub fn use_gc(mut self, use_gc: bool) -> Builder {
-        self.use_gc = use_gc;
-        self
-    }
-
     /// Sets the maximum lifetime of connections in the pool.
     ///
     /// If set, connections will be closed at the next reaping after surviving
@@ -88,16 +74,6 @@ impl Builder {
     /// Defaults to 10 minutes.
     pub fn idle_timeout(mut self, idle_timeout: Option<Duration>) -> Builder {
         self.idle_timeout = idle_timeout;
-        self
-    }
-
-    /// Sets the connection reaper rate.
-    ///
-    /// The connection that are idle and live beyond the time gate will be dropped.
-    ///
-    /// Default 15 seconds.(no guarantee as we don't force lock the pool)
-    pub fn reaper_rate(mut self, reaper_rate: Duration) -> Builder {
-        self.reaper_rate = reaper_rate;
         self
     }
 
@@ -140,10 +116,5 @@ impl Builder {
         );
 
         Pool::new(self, manager)
-    }
-
-    /// expose `reaper_rate` to public.
-    pub fn get_reaper_rate(&self) -> Duration {
-        self.reaper_rate
     }
 }
