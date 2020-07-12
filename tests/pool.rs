@@ -417,6 +417,51 @@ async fn max_lifetime() {
 //     pool_state(&pool, 0, 0, 0);
 // }
 
+#[tokio::test]
+async fn max_sync() {
+    let cpus = num_cpus::get();
+
+    test_pool!(1, 100);
+
+    let mgr = TestPoolManager(AtomicUsize::new(0));
+
+    let pool = Builder::new()
+        .always_check(false)
+        .max_lifetime(Some(Duration::from_secs(2)))
+        .min_idle(cpus)
+        .max_size(cpus)
+        .build(mgr)
+        .await
+        .expect("fail to build pool");
+
+    let mut conns = Vec::new();
+
+    for _i in 0..cpus {
+        let conn = pool.get_sync();
+        conns.push(conn);
+    }
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+    let mut futs = Vec::new();
+
+    for _ in 0..cpus * 128 {
+        let p = pool.clone();
+        futs.push(async move {
+            let conn = p.get_sync();
+            drop(conn);
+        })
+    }
+
+    tokio::spawn(async move {
+        let _ = futures::future::join_all(futs).await;
+        let _ = tx.send(());
+    });
+
+    drop(conns);
+    let _ = rx.await;
+}
+
 fn pool_state<M: Manager>(pool: &Pool<M>, conn: usize, idle: usize, pending: usize) {
     let state = pool.state();
 

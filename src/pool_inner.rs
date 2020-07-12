@@ -3,9 +3,10 @@ use core::future::Future;
 use core::marker::PhantomData;
 use core::num::NonZeroUsize;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicUsize, Ordering};
+// use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task::{Context, Poll};
 
+use crate::util::backoff::Backoff;
 #[cfg(feature = "no-send")]
 use crate::util::cell_pool::{CellPool, CellPoolGuard};
 use crate::util::linked_list::{
@@ -16,14 +17,14 @@ use crate::util::lock_free_pool::{PoolInner, PopError};
 use crate::{
     builder::Builder,
     manager::Manager,
-    pool::{IdleConn, PoolRefBehavior},
+    pool::{DropAndSpawn, IdleConn, PoolRefBehavior},
     SharedManagedPool,
 };
 
 pub(crate) struct PoolLock<M: Manager> {
     inner: PoolInner<IdleConn<M>>,
     waiters: WakerListLock<WakerList>,
-    config: Config,
+    state: PoolLockState,
 }
 
 impl<M: Manager> PoolLock<M> {
@@ -31,7 +32,7 @@ impl<M: Manager> PoolLock<M> {
         Self {
             inner: PoolInner::new(builder.max_size),
             waiters: WakerListLock::new(WakerList::new()),
-            config: Config::from_builder(builder),
+            state: PoolLockState::from_builder(builder),
         }
     }
 
@@ -41,18 +42,16 @@ impl<M: Manager> PoolLock<M> {
     }
 }
 
-pub(crate) struct Config {
-    marker: AtomicUsize,
-    min_idle: AtomicUsize,
-    max_size: AtomicUsize,
+pub(crate) struct PoolLockState {
+    // min_idle: AtomicUsize,
+    min_idle: usize,
 }
 
-impl Config {
-    pub(crate) fn from_builder(builder: &Builder) -> Self {
+impl PoolLockState {
+    fn from_builder(builder: &Builder) -> Self {
         Self {
-            marker: AtomicUsize::new(0),
-            min_idle: AtomicUsize::new(builder.min_idle),
-            max_size: AtomicUsize::new(builder.max_size),
+            // min_idle: AtomicUsize::new(builder.min_idle),
+            min_idle: builder.min_idle,
         }
     }
 }
@@ -74,14 +73,36 @@ impl<M: Manager> PoolLock<M> {
         }
     }
 
+    // ToDo: for now this call does not check the running state of pool inner.
+    pub(crate) fn lock_sync<'a, R>(&'a self, shared_pool: &'a SharedManagedPool<M>) -> R
+    where
+        R: PoolRefBehavior<'a, M>,
+    {
+        let backoff = Backoff::new();
+
+        loop {
+            match self.inner.pop() {
+                Ok(conn) => {
+                    return R::from_idle(conn, shared_pool);
+                }
+                Err(e) => {
+                    if PopError::SpawnNow == e {
+                        shared_pool.spawn_idle();
+                    }
+                }
+            }
+            backoff.snooze();
+        }
+    }
+
     // add pending directly to pool inner if we try to spawn new connections.
     // and return the new pending count as option to notify the Pool to replenish connections
-    pub(crate) fn dec_active(&self, marker: usize, should_spawn_new: bool) -> Option<usize> {
-        let total = self.inner.dec_active(1) - 1;
-        let self_marker = self.config.marker.load(Ordering::SeqCst);
-        let self_min = self.config.min_idle.load(Ordering::SeqCst);
+    pub(crate) fn dec_active(&self) -> Option<usize> {
+        let total = self.inner.dec_active(1);
+        // let self_min = self.min_idle();
+        let self_min = self.state.min_idle;
 
-        if total < self_min && should_spawn_new && marker == self_marker {
+        if total < self_min {
             let pending_new = self_min - total;
             self.inner.inc_pending(pending_new);
             Some(pending_new)
@@ -99,46 +120,23 @@ impl<M: Manager> PoolLock<M> {
     }
 
     #[inline]
-    pub(crate) fn put_back(&self, conn: IdleConn<M>) {
-        let _ = self.inner.push_back(conn);
+    pub(crate) fn push_back(&self, conn: IdleConn<M>) {
+        self.inner.push_back(conn);
         self.lock_waiter().wake_one();
     }
 
-    pub(crate) fn put_back_inc_spawned(&self, conn: IdleConn<M>) {
-        let _ = self.inner.push_new(conn);
+    pub(crate) fn push_new(&self, conn: IdleConn<M>) {
+        self.inner.push_new(conn);
         self.lock_waiter().wake_one();
     }
 
-    pub(crate) fn clear(&self) {}
-
-    pub(crate) fn set_max_size(&self, size: usize) {
-        self.config.max_size.store(size, Ordering::Relaxed);
-    }
-
-    fn max_size(&self) -> usize {
-        self.config.max_size.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn set_min_idle(&self, size: usize) {
-        self.config.min_idle.store(size, Ordering::Relaxed);
-    }
-
-    fn min_idle(&self) -> usize {
-        self.config.min_idle.load(Ordering::Relaxed)
-    }
-
-    #[inline]
-    pub(crate) fn marker(&self) -> usize {
-        self.config.marker.load(Ordering::Relaxed)
-    }
-
-    #[inline]
-    fn spawn_idle_conn(&self, shared_pool: &SharedManagedPool<M>) {
-        let shared_clone = shared_pool.clone();
-        shared_pool.spawn(async move {
-            let _ = shared_clone.add_idle_conn(0).await;
-        });
-    }
+    // pub(crate) fn set_min_idle(&self, size: usize) {
+    //     self.state.min_idle.store(size, Ordering::SeqCst);
+    // }
+    //
+    // fn min_idle(&self) -> usize {
+    //     self.state.min_idle.load(Ordering::SeqCst)
+    // }
 
     pub(crate) fn state(&self) -> State {
         let (idle_connections, connections, pending_connections) = self.inner.state();
@@ -200,28 +198,24 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let shared_pool = self.shared_pool;
-
-        // we return pending directly if the pool is in pausing state.
-        if !shared_pool.is_running() {
-            return Poll::Pending;
-        }
-
         let pool_lock = self.pool_lock;
 
         match pool_lock.inner.pop() {
             Ok(conn) => {
+                let r = R::from_idle(conn, shared_pool);
+
                 // remove self from waiter list
                 if let Some(wait_key) = self.wait_key {
                     unsafe { pool_lock.lock_waiter().remove(wait_key) };
                     self.wait_key = None;
                 }
 
-                Poll::Ready(R::from_idle(conn, shared_pool))
+                Poll::Ready(r)
             }
             Err(e) => {
                 // spawn according to error.
                 if PopError::SpawnNow == e {
-                    pool_lock.spawn_idle_conn(shared_pool);
+                    shared_pool.spawn_idle();
                 }
 
                 // insert or update wait key.

@@ -1,7 +1,7 @@
-/// From [concurrent-queue](https://crates.io/crate/concurrent-queue)
+/// This code is a mostly a copy/paste from [concurrent-queue](https://crates.io/crate/concurrent-queue)
 ///
 /// Changes:
-/// - remove `mark_bit` as we want to close the queue from outside.
+/// - remove `mark_bit` as we want to close/replace the queue from outside.
 /// - add `active_pending` field for tracking the active and pending item count of queue
 ///   (Both inside and outside of queue for a given moment)
 /// - add `shift` field for comparing `active_pending` with `cap`.
@@ -99,37 +99,17 @@ impl<T> PoolInner<T> {
         let shift = (one_lap - 1).count_ones() as usize;
 
         PoolInner {
-            active_pending: CachePadded::new(AtomicUsize::new(0)),
             buffer,
             cap,
             one_lap,
             shift,
+            active_pending: CachePadded::new(AtomicUsize::new(0)),
             head: CachePadded::new(AtomicUsize::new(head)),
             tail: CachePadded::new(AtomicUsize::new(tail)),
             _marker: PhantomData,
         }
     }
 
-    /// Attempts to push a new item into the queue.
-    pub(crate) fn push_new(&self, value: T) -> Result<(), PushError> {
-        match self.push_back(value) {
-            Ok(()) => {
-                // push success we increment active count and decrement pending count both by 1.
-                self.active_pending
-                    .fetch_add(self.one_lap - 1, Ordering::Relaxed);
-
-                Ok(())
-            }
-            Err(e) => {
-                // push failed for some reason and we just decrement pending count.
-                self.active_pending.fetch_sub(1, Ordering::Relaxed);
-                Err(e)
-            }
-        }
-    }
-
-    /// *. NOTE: Whoever take the ownership of `PopError::SpawnNow` is responsible to call
-    /// `PoolInner::dec_pending` if it failed to spawn a new item for queue.
     pub(crate) fn dec_pending(&self, count: usize) {
         self.active_pending.fetch_sub(count, Ordering::SeqCst);
     }
@@ -138,7 +118,7 @@ impl<T> PoolInner<T> {
         self.active_pending.fetch_add(count, Ordering::SeqCst);
     }
 
-    // would return old active + pending count
+    // would return new active + pending count
     pub(crate) fn dec_active(&self, count: usize) -> usize {
         let active_pending = self
             .active_pending
@@ -148,11 +128,74 @@ impl<T> PoolInner<T> {
         let pending = active_pending & one_lap;
         let active = (active_pending & !one_lap) >> self.shift;
 
-        active + pending
+        active + pending - count
+    }
+
+    /// Attempts to push a new item into the queue.
+    pub(crate) fn push_new(&self, value: T) {
+        match self.push(value) {
+            Ok(()) => {
+                // push success we increment active count and decrement pending count both by 1.
+                self.active_pending
+                    .fetch_add(self.one_lap - 1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                // push failed for some reason and we just decrement pending count.
+                self.active_pending.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Attempts to push a returning item into the queue.
-    pub(crate) fn push_back(&self, value: T) -> Result<(), PushError> {
+    pub(crate) fn push_back(&self, value: T) {
+        // We assume the push will never fail.
+        let _ = self.push(value);
+    }
+
+    /// Attempts to pop an item from the queue.
+    ///
+    /// When we get an error for popping we would check the active_pending count and return
+    /// `PopError::SpawnNow` to notify the caller it's time to spawn new item for the queue.
+    ///
+    /// *. NOTE: Whoever take the ownership of `PopError::SpawnNow` is responsible for spawn the
+    /// new item and call `PoolInner::push_new` to insert the new item.
+    /// (or call `PoolInner::dec_pending` if it failed to do so.)
+    pub(crate) fn pop(&self) -> Result<T, PopError> {
+        self._pop().map_err(|e| {
+            // read the active pending
+            let mut active_pending = self.active_pending.load(Ordering::Relaxed);
+            loop {
+                let pending = active_pending & (self.one_lap - 1);
+                // ToDo: find a better way to check the count without shift.
+                let active = (active_pending & !(self.one_lap - 1)) >> self.shift;
+
+                // if we are at the cap then just break and return empty error.
+                if active + pending == self.cap {
+                    break;
+                } else {
+                    // otherwise we increment pending count and try to write.
+                    match self.active_pending.compare_exchange_weak(
+                        active_pending,
+                        active_pending + 1,
+                        Ordering::SeqCst,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => {
+                            // write success we notify the caller it's time to spawn
+                            return PopError::SpawnNow;
+                        }
+                        Err(acp) => {
+                            active_pending = acp;
+                        }
+                    }
+                }
+            }
+            e
+        })
+    }
+
+    /// Attempts to push an item into the queue.
+    fn push(&self, value: T) -> Result<(), PushError> {
         let mut tail = self.tail.load(Ordering::Relaxed);
 
         loop {
@@ -212,48 +255,6 @@ impl<T> PoolInner<T> {
                 tail = self.tail.load(Ordering::Relaxed);
             }
         }
-    }
-
-    /// Attempts to pop an item from the queue.
-    ///
-    /// When we get an error for popping we would check the active_pending count and return
-    /// `PopError::SpawnNow` to notify the caller it's time to spawn new item for the queue.
-    ///
-    /// *. NOTE: Whoever take the ownership of `PopError::SpawnNow` is responsible for spawn the
-    /// new item and call `PoolInner::push_new` to insert the new item.
-    /// (or call `PoolInner::dec_pending` if it failed to do so.)
-    pub(crate) fn pop(&self) -> Result<T, PopError> {
-        self._pop().map_err(|e| {
-            // read the active pending
-            let mut active_pending = self.active_pending.load(Ordering::Relaxed);
-            loop {
-                let pending = active_pending & (self.one_lap - 1);
-                // ToDo: find a better way to check the count without shift.
-                let active = (active_pending & !(self.one_lap - 1)) >> self.shift;
-
-                // if we are at the cap then just break and return empty error.
-                if active + pending == self.cap {
-                    break;
-                } else {
-                    // otherwise we increment pending count and try to write.
-                    match self.active_pending.compare_exchange_weak(
-                        active_pending,
-                        active_pending + 1,
-                        Ordering::SeqCst,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => {
-                            // write success we notify the caller it's time to spawn
-                            return PopError::SpawnNow;
-                        }
-                        Err(acp) => {
-                            active_pending = acp;
-                        }
-                    }
-                }
-            }
-            e
-        })
     }
 
     /// Attempts to pop an item from the queue.

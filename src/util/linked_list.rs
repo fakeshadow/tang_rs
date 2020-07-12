@@ -3,9 +3,6 @@ use core::mem::replace;
 use core::num::NonZeroUsize;
 use core::ptr::null_mut;
 use core::task::Waker;
-use std::cell::Cell;
-use std::sync::atomic::spin_loop_hint;
-use std::thread::yield_now;
 
 // This linked list come from https://github.com/async-rs/async-std/pull/370 by nbdd0121
 
@@ -165,7 +162,7 @@ pub(crate) mod linked_list_lock {
 
     #[cfg(not(feature = "no-send"))]
     use {
-        super::Backoff,
+        crate::util::backoff::Backoff,
         core::sync::atomic::{AtomicUsize, Ordering},
     };
 
@@ -261,34 +258,5 @@ pub(crate) mod linked_list_lock {
                 panic!("WakerListLock already locked by others");
             }
         }
-    }
-}
-
-/// A simple backoff (`crossbeam-util::backoff::BackOff` with yield limit disabled.)
-struct Backoff {
-    cycle: Cell<u8>,
-}
-
-const SPIN_LIMIT: u8 = 6;
-
-impl Backoff {
-    #[inline]
-    pub(super) fn new() -> Self {
-        Self {
-            cycle: Cell::new(0),
-        }
-    }
-
-    #[inline]
-    pub(super) fn snooze(&self) {
-        if self.cycle.get() <= SPIN_LIMIT {
-            for _ in 0..1 << self.cycle.get() {
-                spin_loop_hint();
-            }
-        } else {
-            return yield_now();
-        }
-
-        self.cycle.set(self.cycle.get() + 1);
     }
 }
