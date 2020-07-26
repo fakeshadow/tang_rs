@@ -1,14 +1,19 @@
 use core::fmt;
 use core::future::Future;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(not(feature = "no-send"))]
-use std::sync::{Arc as WrapPointer, Weak};
 use std::time::Instant;
 #[cfg(feature = "no-send")]
-use std::{
-    rc::{Rc as WrapPointer, Weak},
-    thread::{self, ThreadId},
+use {
+    core::cell::Cell,
+    std::{
+        rc::{Rc as WrapPointer, Weak},
+        thread::{self, ThreadId},
+    },
+};
+#[cfg(not(feature = "no-send"))]
+use {
+    core::sync::atomic::{AtomicBool, Ordering},
+    std::sync::{Arc as WrapPointer, Weak},
 };
 
 use crate::builder::Builder;
@@ -74,7 +79,10 @@ impl<M: Manager> From<IdleConn<M>> for Conn<M> {
 pub struct ManagedPool<M: Manager> {
     builder: Builder,
     manager: M,
+    #[cfg(not(feature = "no-send"))]
     running: AtomicBool,
+    #[cfg(feature = "no-send")]
+    running: Cell<bool>,
     pool_lock: PoolLock<M>,
 }
 
@@ -85,7 +93,10 @@ impl<M: Manager> ManagedPool<M> {
         Self {
             builder,
             manager,
+            #[cfg(not(feature = "no-send"))]
             running: AtomicBool::new(true),
+            #[cfg(feature = "no-send")]
+            running: Cell::new(true),
             pool_lock,
         }
     }
@@ -152,8 +163,7 @@ impl<M: Manager> ManagedPool<M> {
                 e
             })?;
 
-        self.pool_lock
-            .put_back_inc_spawned(IdleConn::new(conn, marker));
+        self.pool_lock.put_new(IdleConn::new(conn, marker));
 
         Ok(())
     }
@@ -189,11 +199,21 @@ impl<M: Manager> ManagedPool<M> {
     }
 
     fn if_running(&self, running: bool) {
+        #[cfg(not(feature = "no-send"))]
         self.running.store(running, Ordering::Release);
+        #[cfg(feature = "no-send")]
+        self.running.set(running);
     }
 
     pub(crate) fn is_running(&self) -> bool {
-        self.running.load(Ordering::Acquire)
+        #[cfg(not(feature = "no-send"))]
+        {
+            self.running.load(Ordering::Acquire)
+        }
+        #[cfg(feature = "no-send")]
+        {
+            self.running.get()
+        }
     }
 
     #[cfg(not(feature = "no-send"))]

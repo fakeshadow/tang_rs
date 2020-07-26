@@ -18,7 +18,6 @@ path = "../../redis_tang"
 
 [dependencies.rocket]
 git = "https://github.com/SergioBenitez/Rocket"
-branch = "async"
 
 [dependencies.serde]
 version = "1.0.101"

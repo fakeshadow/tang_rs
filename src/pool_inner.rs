@@ -32,6 +32,8 @@ macro_rules! pool_lock {
         $pool_guard_type: ident,
         $pool_lock_method: ident,
         $pool_try_lock_method: ident,
+        $waiter_type: ty,
+        $waiter_type_path: ident,
         $waiter_lock_type: ident,
         $waiter_guard_type: ident,
         $waiter_lock_method: ident
@@ -39,7 +41,7 @@ macro_rules! pool_lock {
     ) => {
         pub(crate) struct PoolLock<M: Manager> {
             inner: $pool_lock_type<PoolInner<M>>,
-            waiters: $waiter_lock_type<WakerList>,
+            waiters: $waiter_lock_type<$waiter_type>,
             config: Config,
         }
 
@@ -47,7 +49,7 @@ macro_rules! pool_lock {
             pub(crate) fn from_builder(builder: &Builder) -> Self {
                 Self {
                     inner: $pool_lock_type::new(PoolInner::with_capacity(builder.max_size)),
-                    waiters: $waiter_lock_type::new(WakerList::new()),
+                    waiters: $waiter_lock_type::new($waiter_type_path::new()),
                     config: Config::from_builder(builder),
                 }
             }
@@ -63,7 +65,7 @@ macro_rules! pool_lock {
             }
 
             #[inline]
-            pub(crate) fn lock_waiter(&self) -> $waiter_guard_type<'_, WakerList> {
+            pub(crate) fn lock_waiter(&self) -> $waiter_guard_type<'_, $waiter_type> {
                 self.waiters.$waiter_lock_method()$(.$opt())*
             }
         }
@@ -76,6 +78,8 @@ pool_lock!(
     SpinPoolGuard,
     lock,
     try_lock,
+    WakerList,
+    WakerList,
     WakerListLock,
     WakerListGuard,
     lock
@@ -87,6 +91,12 @@ pool_lock!(
     CellPoolGuard,
     lock,
     try_lock,
+    // VecDeque<Waker>,
+    // VecDeque,
+    // CellPool,
+    // CellPoolGuard,
+    WakerList,
+    WakerList,
     WakerListLock,
     WakerListGuard,
     lock
@@ -294,10 +304,11 @@ impl<M: Manager> PoolLock<M> {
         }
 
         drop(inner);
-        self.lock_waiter().wake_one_weak().wake();
+
+        self.wake_one();
     }
 
-    pub(crate) fn put_back_inc_spawned(&self, conn: IdleConn<M>) {
+    pub(crate) fn put_new(&self, conn: IdleConn<M>) {
         let mut inner = self.lock_inner();
 
         inner._dec_pending(1);
@@ -310,7 +321,7 @@ impl<M: Manager> PoolLock<M> {
         }
 
         drop(inner);
-        self.lock_waiter().wake_one_weak().wake();
+        self.wake_one();
     }
 
     pub(crate) fn clear(&self) {
@@ -364,6 +375,10 @@ impl<M: Manager> PoolLock<M> {
             });
             inner.inc_pending(1);
         }
+    }
+
+    fn wake_one(&self) {
+        self.lock_waiter().wake_one_weak().wake();
     }
 }
 
@@ -429,7 +444,6 @@ where
         // Either insert our waker if we don't have a wait key yet or overwrite the old waker entry if we already have a wait key.
         match self.wait_key {
             Some(wait_key) => {
-
                 // force lock if we are already in wait list
                 let mut inner = pool_lock.lock_inner();
 
@@ -452,27 +466,27 @@ where
                 if opt
                     .as_ref()
                     .map(|waker| !waker.will_wake(cx.waker()))
-                    .unwrap_or_else(|| true)
+                    .unwrap_or(true)
                 {
                     *opt = Some(cx.waker().clone());
                 }
             }
             None => {
-                    #[cfg(not(feature = "no-send"))]
-                        {
-                            // Safety: try_lock_2 only obtain lock when pool is not empty so the unwrap is safe.
-                            if let Ok(mut guard) = pool_lock.inner.try_lock_2() {
-                                return Poll::Ready(R::from_idle(guard.pop_conn().unwrap(), shared_pool));
-                            }
+                #[cfg(not(feature = "no-send"))]
+                {
+                    // Safety: try_lock_2 only obtain lock when pool is not empty so the unwrap is safe.
+                    if let Ok(mut guard) = pool_lock.inner.try_lock_2() {
+                        return Poll::Ready(R::from_idle(guard.pop_conn().unwrap(), shared_pool));
+                    }
+                }
+                #[cfg(feature = "no-send")]
+                {
+                    if let Some(mut guard) = pool_lock.try_lock_inner() {
+                        if let Some(conn) = guard.pop_conn() {
+                            return Poll::Ready(R::from_idle(conn, shared_pool));
                         }
-                    #[cfg(feature = "no-send")]
-                        {
-                            if let Some(mut guard) = pool_lock.try_lock_inner() {
-                                if let Some(conn) = guard.pop_conn() {
-                                    return Poll::Ready(R::from_idle(conn, shared_pool));
-                                }
-                            }
-                        }
+                    }
+                }
 
                 let wait_key = pool_lock.lock_waiter().insert(Some(cx.waker().clone()));
 
