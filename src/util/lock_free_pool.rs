@@ -110,6 +110,7 @@ impl<T> PoolInner<T> {
         }
     }
 
+    // We assume pending/active modification is not frequent call so we use strict atomic order.
     pub(crate) fn dec_pending(&self, count: usize) {
         self.active_pending.fetch_sub(count, Ordering::SeqCst);
     }
@@ -161,37 +162,38 @@ impl<T> PoolInner<T> {
     /// new item and call `PoolInner::push_new` to insert the new item.
     /// (or call `PoolInner::dec_pending` if it failed to do so.)
     pub(crate) fn pop(&self) -> Result<T, PopError> {
-        self._pop().map_err(|e| {
-            // read the active pending
-            let mut active_pending = self.active_pending.load(Ordering::Relaxed);
-            loop {
-                let pending = active_pending & (self.one_lap - 1);
-                // ToDo: find a better way to check the count without shift.
-                let active = (active_pending & !(self.one_lap - 1)) >> self.shift;
+        self._pop().map_err(|e| self._inc_pending(e))
+    }
 
-                // if we are at the cap then just break and return empty error.
-                if active + pending == self.cap {
-                    break;
-                } else {
-                    // otherwise we increment pending count and try to write.
-                    match self.active_pending.compare_exchange_weak(
-                        active_pending,
-                        active_pending + 1,
-                        Ordering::SeqCst,
-                        Ordering::Relaxed,
-                    ) {
-                        Ok(_) => {
-                            // write success we notify the caller it's time to spawn
-                            return PopError::SpawnNow;
-                        }
-                        Err(acp) => {
-                            active_pending = acp;
-                        }
+    fn _inc_pending(&self, e: PopError) -> PopError {
+        let mut active_pending = self.active_pending.load(Ordering::Relaxed);
+        loop {
+            let pending = active_pending & (self.one_lap - 1);
+            // ToDo: find a better way to check the count without shift.
+            let active = active_pending >> self.shift;
+
+            // if we are at the cap then just break and return empty error.
+            if active + pending == self.cap {
+                break;
+            } else {
+                // otherwise we increment pending count and try to write.
+                match self.active_pending.compare_exchange_weak(
+                    active_pending,
+                    active_pending + 1,
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        // write success we notify the caller it's time to spawn
+                        return PopError::SpawnNow;
+                    }
+                    Err(acp) => {
+                        active_pending = acp;
                     }
                 }
             }
-            e
-        })
+        }
+        e
     }
 
     /// Attempts to push an item into the queue.
@@ -274,11 +276,11 @@ impl<T> PoolInner<T> {
             if head + 1 == stamp {
                 let new = if index + 1 < self.cap {
                     // Same lap, incremented index.
-                    // Set to `{ lap: lap, mark: 0, index: index + 1 }`.
+                    // Set to `{ lap: lap, index: index + 1 }`.
                     head + 1
                 } else {
                     // One lap forward, index wraps around to zero.
-                    // Set to `{ lap: lap.wrapping_add(1), mark: 0, index: 0 }`.
+                    // Set to `{ lap: lap.wrapping_add(1), index: 0 }`.
                     lap.wrapping_add(self.one_lap)
                 };
 
@@ -388,11 +390,17 @@ pub(crate) enum PopError {
     /// The queue is empty but not closed.
     Empty,
 
-    /// A new T must be spawned now.
+    /// A new `T` must be spawned now.
     ///
-    /// *. Whoever get hold of SpawnNow error must take responsibility of spawn new T and call
-    /// `PoolInner::push_spawn`(Or `PoolInner::dec_pending` if it fails at spawning)
+    /// *. Whoever get hold of SpawnNow error must take responsibility of spawn new `T` and call
+    /// `PoolInner::push_new`(Or `PoolInner::dec_pending` if it fails at spawning)
     SpawnNow,
+}
+
+impl PopError {
+    pub(crate) fn is_spawn_now(self) -> bool {
+        self == PopError::SpawnNow
+    }
 }
 
 impl error::Error for PopError {}

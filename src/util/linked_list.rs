@@ -91,7 +91,7 @@ impl WakerList {
     }
 
     /// Get an iterator over all wakers.
-    fn iter_mut(&mut self) -> Iter<'_> {
+    pub(crate) fn iter_mut(&mut self) -> Iter<'_> {
         Iter {
             ptr: self.head,
             _marker: PhantomData,
@@ -99,12 +99,14 @@ impl WakerList {
     }
 
     /// Take the first not `None` waker in the list and wake it.
-    pub(crate) fn wake_one(&mut self) {
-        for opt in self.iter_mut() {
-            if let Some(waker) = opt.take() {
-                return waker.wake();
-            }
-        }
+    pub(crate) fn wake_one(&mut self) -> bool {
+        self.iter_mut()
+            .find_map(|w| w.take())
+            .map(|w| {
+                w.wake();
+                true
+            })
+            .unwrap_or(false)
     }
 }
 

@@ -46,7 +46,6 @@ async fn main() {
         .always_check(false)
         .idle_timeout(None)
         .max_lifetime(None)
-        .reaper_rate(std::time::Duration::from_secs(5))
         .min_idle(1)
         .max_size(24)
         .build(mgr)
@@ -60,8 +59,7 @@ async fn main() {
         .always_check(false)
         .idle_timeout(None)
         .max_lifetime(None)
-        .reaper_rate(std::time::Duration::from_secs(15))
-        .min_idle(0)
+        .min_idle(1)
         .max_size(24)
         .build(mgr)
         .await

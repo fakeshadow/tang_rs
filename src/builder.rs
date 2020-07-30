@@ -3,6 +3,7 @@ use core::time::Duration;
 use crate::manager::Manager;
 use crate::pool::Pool;
 
+#[derive(Clone)]
 pub struct Builder {
     pub(crate) max_size: usize,
     pub(crate) min_idle: usize,
