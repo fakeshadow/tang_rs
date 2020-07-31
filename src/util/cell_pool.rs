@@ -1,73 +1,143 @@
-use core::cell::{Cell, UnsafeCell};
+use core::cell::Cell;
 use core::ops::{Deref, DerefMut};
+
+use std::collections::VecDeque;
+
+use crate::util::pool_error::PopError;
 
 /// `CellPool` is just a wrapper for `Cell/UnsafeCell` and would panic at runtime if concurrent access happen
 pub struct CellPool<T> {
     // false means pool is free. true means pool is locked
-    state: Cell<bool>,
-    inner: UnsafeCell<T>,
+    state: Cell<State<T>>,
+}
+
+enum State<T> {
+    Free(StateInner<T>),
+    Locked,
+}
+
+struct StateInner<T> {
+    max_size: usize,
+    active: usize,
+    pending: usize,
+    conn: VecDeque<T>,
 }
 
 impl<T> CellPool<T> {
     #[inline]
-    pub const fn new(t: T) -> Self {
+    pub fn new(max_size: usize) -> Self {
         Self {
-            state: Cell::new(false),
-            inner: UnsafeCell::new(t),
+            state: Cell::new(State::Free(StateInner {
+                max_size,
+                active: 0,
+                pending: 0,
+                conn: VecDeque::with_capacity(max_size),
+            })),
         }
     }
 }
 
-/// `T` can only be accessed through `CellPoolGuard`
-pub struct CellPoolGuard<'a, T> {
+struct CellPoolGuard<'a, T> {
     pool: &'a CellPool<T>,
-    inner: &'a mut T,
-}
-
-impl<T> Drop for CellPoolGuard<'_, T> {
-    fn drop(&mut self) {
-        self.pool.state.set(false);
-    }
+    inner: Option<StateInner<T>>,
 }
 
 impl<T> Deref for CellPoolGuard<'_, T> {
-    type Target = T;
+    type Target = StateInner<T>;
 
     fn deref(&self) -> &Self::Target {
-        self.inner
+        self.inner.as_ref().unwrap()
     }
 }
 
 impl<T> DerefMut for CellPoolGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.inner
+        self.inner.as_mut().unwrap()
+    }
+}
+
+impl<T> Drop for CellPoolGuard<'_, T> {
+    fn drop(&mut self) {
+        self.pool
+            .state
+            .replace(State::Free(self.inner.take().unwrap()));
     }
 }
 
 impl<T> CellPool<T> {
     #[inline]
     fn guard(&self) -> CellPoolGuard<'_, T> {
-        CellPoolGuard {
-            pool: self,
-            inner: unsafe { &mut *self.inner.get() },
+        match self.state.replace(State::Locked) {
+            State::Locked => panic!("Concurrent access to Cell pool is not allowed"),
+            State::Free(inner) => CellPoolGuard {
+                pool: &self,
+                inner: Some(inner),
+            },
         }
     }
 
-    /// try to lock the pool immediately.
-    ///
-    /// We return a `Result` instead of `Option` for the purpose of keep a consistency with std lib's locks
     #[inline]
-    pub fn try_lock(&self) -> Result<CellPoolGuard<'_, T>, ()> {
-        if self.state.replace(true) == false {
-            return Ok(self.guard());
-        }
-        Err(())
+    pub(crate) fn push_back(&self, value: T) {
+        let mut guard = self.guard();
+
+        guard.conn.push_back(value);
     }
 
-    /// lock the pool immediately. Will panic if the pool is already locked by others.
     #[inline]
-    pub fn lock(&self) -> CellPoolGuard<'_, T> {
-        self.try_lock()
-            .expect("CellPool is already locked elsewhere")
+    pub(crate) fn push_new(&self, value: T) {
+        let mut guard = self.guard();
+
+        guard.pending -= 1;
+        guard.active += 1;
+
+        guard.conn.push_back(value);
+    }
+
+    #[inline]
+    pub(crate) fn pop(&self) -> Result<T, PopError> {
+        let mut guard = self.guard();
+
+        match guard.conn.pop_front() {
+            Some(conn) => Ok(conn),
+            None => {
+                if guard.active + guard.pending < guard.max_size {
+                    guard.pending += 1;
+                    Err(PopError::SpawnNow)
+                } else {
+                    Err(PopError::Empty)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn dec_pending(&self, count: usize) {
+        let mut guard = self.guard();
+        guard.pending -= count;
+    }
+
+    pub(crate) fn inc_pending(&self, count: usize) {
+        let mut guard = self.guard();
+        guard.pending += count;
+    }
+
+    // would return new active + pending count
+    pub(crate) fn dec_active(&self, count: usize) -> usize {
+        let mut guard = self.guard();
+
+        guard.active -= count;
+
+        guard.active + guard.pending
+    }
+
+    // pub(crate) fn len(&self) -> usize {
+    //     let guard = self.guard();
+    //     guard.conn.len()
+    // }
+
+    /// Returns items in queue, active and pending count in tuple
+    pub(crate) fn state(&self) -> (usize, usize, usize) {
+        let guard = self.guard();
+
+        (guard.conn.len(), guard.active, guard.pending)
     }
 }

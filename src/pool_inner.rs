@@ -6,14 +6,18 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 
 #[cfg(feature = "no-send")]
-use crate::util::cell_pool::{CellPool, CellPoolGuard};
+use crate::util::cell_pool::CellPool;
+
+#[cfg(not(feature = "no-send"))]
+use crate::util::lock_free_pool::PoolInner;
+
 use crate::util::{
     backoff::Backoff,
     linked_list::{
         linked_list_lock::{WakerListGuard, WakerListLock},
         WakerList,
     },
-    lock_free_pool::{PoolInner, PopError},
+    pool_error::PopError,
 };
 use crate::{
     builder::Builder,
@@ -22,26 +26,36 @@ use crate::{
     SharedManagedPool,
 };
 
-pub(crate) struct PoolLock<M: Manager> {
-    inner: PoolInner<IdleConn<M>>,
-    waiters: WakerListLock<WakerList>,
-    state: PoolLockState,
-}
-
-impl<M: Manager> PoolLock<M> {
-    pub(crate) fn from_builder(builder: &Builder) -> Self {
-        Self {
-            inner: PoolInner::new(builder.max_size),
-            waiters: WakerListLock::new(WakerList::new()),
-            state: PoolLockState::from_builder(builder),
+macro_rules! pool_lock {
+    ($pool_ty: ident) => {
+        pub(crate) struct PoolLock<M: Manager> {
+            inner: $pool_ty<IdleConn<M>>,
+            waiters: WakerListLock<WakerList>,
+            state: PoolLockState,
         }
-    }
 
-    #[inline]
-    pub(crate) fn lock_waiter(&self) -> WakerListGuard<'_, WakerList> {
-        self.waiters.lock()
-    }
+        impl<M: Manager> PoolLock<M> {
+            pub(crate) fn from_builder(builder: &Builder) -> Self {
+                Self {
+                    inner: $pool_ty::new(builder.max_size),
+                    waiters: WakerListLock::new(WakerList::new()),
+                    state: PoolLockState::from_builder(builder),
+                }
+            }
+
+            #[inline]
+            pub(crate) fn lock_waiter(&self) -> WakerListGuard<'_, WakerList> {
+                self.waiters.lock()
+            }
+        }
+    };
 }
+
+#[cfg(not(feature = "no-send"))]
+pool_lock!(PoolInner);
+
+#[cfg(feature = "no-send")]
+pool_lock!(CellPool);
 
 pub(crate) struct PoolLockState {
     min_idle: usize,
