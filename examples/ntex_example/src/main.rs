@@ -22,7 +22,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             // use data_factory to build pool for every thread
             .data_factory(|| {
-                let db_url = "postgres://postgres:123@localhost/test";
+                let db_url = "postgres://postgres:123@localhost/test2";
                 let mgr = PostgresManager::new_from_stringlike(db_url, NoTls)
                     .expect("can't make postgres manager")
                     .prepare_statement(
@@ -46,8 +46,8 @@ async fn main() -> std::io::Result<()> {
                 let mgr = RedisManager::new("redis://127.0.0.1");
                 Builder::new()
                     .always_check(false)
-                    .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
-                    .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+                    .idle_timeout(None)
+                    .max_lifetime(None)
                     .min_idle(2)
                     .max_size(2)
                     .build(mgr)

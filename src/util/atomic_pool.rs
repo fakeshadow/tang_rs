@@ -7,8 +7,7 @@
 /// - add `shift` field for comparing `active_pending` with `cap`.
 /// - `one_lap` serves as the bitwise operator of both `head`/`tail` and `active_pending`.
 use core::cell::UnsafeCell;
-use core::marker::PhantomData;
-use core::mem::{self, MaybeUninit};
+use core::mem::MaybeUninit;
 use core::sync::atomic::{self, AtomicUsize, Ordering};
 
 use std::thread;
@@ -20,20 +19,18 @@ use crate::util::pool_error::{PopError, PushError};
 /// A slot in a queue.
 struct Slot<T> {
     /// The current stamp.
-    stamp: AtomicUsize,
+    stamp: CachePadded<AtomicUsize>,
 
     /// The value in this slot.
     value: UnsafeCell<MaybeUninit<T>>,
 }
 
 /// A bounded queue.
-pub(crate) struct PoolInner<T> {
-    /// The current count of active T and pending T of this queue.
+pub(crate) struct AtomicPool<T> {
+    /// The current count of active T.
     ///
     /// They may or may not in the queue currently.
-    ///
-    /// We pack the two counts into one usize with `{ active: 0, pending: 0 }`
-    active_pending: CachePadded<AtomicUsize>,
+    active: CachePadded<AtomicUsize>,
 
     /// The head of the queue.
     ///
@@ -54,24 +51,18 @@ pub(crate) struct PoolInner<T> {
     tail: CachePadded<AtomicUsize>,
 
     /// The buffer holding slots.
-    buffer: *mut Slot<T>,
+    buffer: Box<[Slot<T>]>,
 
     /// The queue capacity.
     cap: usize,
 
     /// A stamp with the value of `{ lap: 1, index: 0 }`.
     one_lap: usize,
-
-    /// We use this to shift the active_pending into/from an actual active count.
-    shift: usize,
-
-    /// Indicates that dropping an `PoolInner<T>` may drop values of type `T`.
-    _marker: PhantomData<T>,
 }
 
-impl<T> PoolInner<T> {
+impl<T> AtomicPool<T> {
     /// Creates a new bounded queue.
-    pub(crate) fn new(cap: usize) -> PoolInner<T> {
+    pub(crate) fn new(cap: usize) -> AtomicPool<T> {
         assert!(cap > 0, "capacity must be positive");
 
         // Head is initialized to `{ lap: 0, index: 0 }`.
@@ -80,73 +71,35 @@ impl<T> PoolInner<T> {
         let tail = 0;
 
         // Allocate a buffer of `cap` slots initialized with stamps.
-        let buffer = {
-            let mut v: Vec<Slot<T>> = (0..cap)
-                .map(|i| {
-                    // Set the stamp to `{ lap: 0, index: i }`.
-                    Slot {
-                        stamp: AtomicUsize::new(i),
-                        value: UnsafeCell::new(MaybeUninit::uninit()),
-                    }
-                })
-                .collect();
-
-            let ptr = v.as_mut_ptr();
-            mem::forget(v);
-            ptr
-        };
+        let mut buffer = Vec::with_capacity(cap);
+        for i in 0..cap {
+            // Set the stamp to `{ lap: 0, index: i }`.
+            buffer.push(Slot {
+                stamp: CachePadded::new(AtomicUsize::new(i)),
+                value: UnsafeCell::new(MaybeUninit::uninit()),
+            });
+        }
 
         // Compute constants `one_lap` and `shift`.
         let one_lap = (cap + 1).next_power_of_two();
-        let shift = (one_lap - 1).count_ones() as usize;
 
-        PoolInner {
-            buffer,
-            cap,
-            one_lap,
-            shift,
-            active_pending: CachePadded::new(AtomicUsize::new(0)),
+        AtomicPool {
+            active: CachePadded::new(AtomicUsize::new(0)),
             head: CachePadded::new(AtomicUsize::new(head)),
             tail: CachePadded::new(AtomicUsize::new(tail)),
-            _marker: PhantomData,
+            buffer: buffer.into(),
+            cap,
+            one_lap,
         }
     }
 
-    // We assume pending/active modification is not frequent call so we use strict atomic order.
-    pub(crate) fn dec_pending(&self, count: usize) {
-        self.active_pending.fetch_sub(count, Ordering::SeqCst);
+    pub(crate) fn inc_active(&self, count: usize) {
+        self.active.fetch_add(count, Ordering::SeqCst);
     }
 
-    pub(crate) fn inc_pending(&self, count: usize) {
-        self.active_pending.fetch_add(count, Ordering::SeqCst);
-    }
-
-    // would return new active + pending count
     pub(crate) fn dec_active(&self, count: usize) -> usize {
-        let active_pending = self
-            .active_pending
-            .fetch_sub(self.one_lap * count, Ordering::SeqCst);
-
-        let one_lap = self.one_lap - 1;
-        let pending = active_pending & one_lap;
-        let active = (active_pending & !one_lap) >> self.shift;
-
-        active + pending - count
-    }
-
-    /// Attempts to push a new item into the queue.
-    pub(crate) fn push_new(&self, value: T) {
-        match self.push(value) {
-            Ok(()) => {
-                // push success we increment active count and decrement pending count both by 1.
-                self.active_pending
-                    .fetch_add(self.one_lap - 1, Ordering::Relaxed);
-            }
-            Err(_) => {
-                // push failed for some reason and we just decrement pending count.
-                self.active_pending.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
+        let active = self.active.fetch_sub(count, Ordering::SeqCst);
+        active - count
     }
 
     /// Attempts to push a returning item into the queue.
@@ -164,24 +117,20 @@ impl<T> PoolInner<T> {
     /// new item and call `PoolInner::push_new` to insert the new item.
     /// (or call `PoolInner::dec_pending` if it failed to do so.)
     pub(crate) fn pop(&self) -> Result<T, PopError> {
-        self._pop().map_err(|e| self._inc_pending(e))
+        self._pop().map_err(|e| self._inc_active(e))
     }
 
-    fn _inc_pending(&self, e: PopError) -> PopError {
-        let mut active_pending = self.active_pending.load(Ordering::Relaxed);
+    fn _inc_active(&self, e: PopError) -> PopError {
+        let mut active = self.active.load(Ordering::Relaxed);
         loop {
-            let pending = active_pending & (self.one_lap - 1);
-            // ToDo: find a better way to check the count without shift.
-            let active = active_pending >> self.shift;
-
             // if we are at the cap then just break and return empty error.
-            if active + pending == self.cap {
+            if active == self.cap {
                 break;
             } else {
                 // otherwise we increment pending count and try to write.
-                match self.active_pending.compare_exchange_weak(
-                    active_pending,
-                    active_pending + 1,
+                match self.active.compare_exchange_weak(
+                    active,
+                    active + 1,
                     Ordering::SeqCst,
                     Ordering::Relaxed,
                 ) {
@@ -190,7 +139,7 @@ impl<T> PoolInner<T> {
                         return PopError::SpawnNow;
                     }
                     Err(acp) => {
-                        active_pending = acp;
+                        active = acp;
                     }
                 }
             }
@@ -208,7 +157,7 @@ impl<T> PoolInner<T> {
             let lap = tail & !(self.one_lap - 1);
 
             // Inspect the corresponding slot.
-            let slot = unsafe { &*self.buffer.add(index) };
+            let slot = &self.buffer[index];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             // If the tail and the stamp match, we may attempt to push.
@@ -271,7 +220,7 @@ impl<T> PoolInner<T> {
             let lap = head & !(self.one_lap - 1);
 
             // Inspect the corresponding slot.
-            let slot = unsafe { &*self.buffer.add(index) };
+            let slot = &self.buffer[index];
             let stamp = slot.stamp.load(Ordering::Acquire);
 
             // If the the stamp is ahead of the head by 1, we may attempt to pop.
@@ -336,7 +285,7 @@ impl<T> PoolInner<T> {
                 return if hix < tix {
                     tix - hix
                 } else if hix > tix {
-                    self.cap - hix + tix
+                    self.buffer.len() - hix + tix
                 } else if tail == head {
                     0
                 } else {
@@ -347,17 +296,15 @@ impl<T> PoolInner<T> {
     }
 
     /// Returns items in queue, active and pending count in tuple
-    pub(crate) fn state(&self) -> (usize, usize, usize) {
-        let active_pending = self.active_pending.load(Ordering::Relaxed);
+    pub(crate) fn state(&self) -> (usize, usize) {
+        let active = self.active.load(Ordering::Relaxed);
         let len = self.len();
-        let pending = active_pending & (self.one_lap - 1);
-        let active = (active_pending & !(self.one_lap - 1)) >> self.shift;
 
-        (len, active, pending)
+        (len, active)
     }
 }
 
-impl<T> Drop for PoolInner<T> {
+impl<T> Drop for AtomicPool<T> {
     fn drop(&mut self) {
         // Get the index of the head.
         let hix = self.head.load(Ordering::Relaxed) & (self.one_lap - 1);
@@ -372,16 +319,11 @@ impl<T> Drop for PoolInner<T> {
             };
 
             // Drop the value in the slot.
+            let slot = &self.buffer[index];
             unsafe {
-                let slot = &*self.buffer.add(index);
                 let value = slot.value.get().read().assume_init();
                 drop(value);
             }
-        }
-
-        // Finally, deallocate the buffer, but don't run any destructors.
-        unsafe {
-            Vec::from_raw_parts(self.buffer, 0, self.cap);
         }
     }
 }

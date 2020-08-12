@@ -1,6 +1,7 @@
 use core::fmt;
 use core::future::Future;
 use core::ops::{Deref, DerefMut};
+use core::time::Duration;
 #[cfg(not(feature = "no-send"))]
 use std::sync::{Arc as WrapPointer, Weak};
 use std::time::Instant;
@@ -12,7 +13,8 @@ use std::{
 
 use crate::builder::Builder;
 use crate::manager::Manager;
-use crate::pool_inner::{PoolLock, State};
+use crate::pool_inner::{PoolInner, State};
+use crate::util::spawn_guard::SpawnGuardOwned;
 
 pub struct Pool<M: Manager> {
     pool: SharedManagedPool<M>,
@@ -29,7 +31,7 @@ impl<M: Manager> Pool<M> {
     pub async fn get(&self) -> Result<PoolRef<'_, M>, M::Error> {
         let shared_pool = &self.pool;
 
-        shared_pool.get_conn(shared_pool).await
+        shared_pool._get(shared_pool).await
     }
 
     /// Return a `PoolRefOwned` contains a weak smart pointer of `SharedManagedPool<Manager>` and an `Option<Manager::Connection>`.
@@ -40,7 +42,7 @@ impl<M: Manager> Pool<M> {
     pub async fn get_owned(&self) -> Result<PoolRefOwned<M>, M::Error> {
         let shared_pool = &self.pool;
 
-        shared_pool.get_conn(shared_pool).await
+        shared_pool._get(shared_pool).await
     }
 
     /// Sync version of `Pool::get`.
@@ -49,7 +51,7 @@ impl<M: Manager> Pool<M> {
     #[inline]
     pub fn get_sync(&self) -> PoolRef<'_, M> {
         let shared_pool = &self.pool;
-        shared_pool.pool_lock.lock_sync(shared_pool)
+        shared_pool.inner.get_inner_sync(shared_pool)
     }
 
     /// Sync version of `Pool::get_owned`.
@@ -58,7 +60,7 @@ impl<M: Manager> Pool<M> {
     #[inline]
     pub fn get_sync_owned(&self) -> PoolRefOwned<M> {
         let shared_pool = &self.pool;
-        shared_pool.pool_lock.lock_sync(shared_pool)
+        shared_pool.inner.get_inner_sync(shared_pool)
     }
 
     /// Run the pool with an async closure.
@@ -118,9 +120,7 @@ impl<M: Manager> Pool<M> {
 
         let count = shared_pool.builder.min_idle;
 
-        shared_pool.pool_lock.inc_pending(count);
-
-        shared_pool.replenish_idle_conn(count).await?;
+        shared_pool.add_multi(count).await?;
 
         shared_pool.manager.on_start(shared_pool);
 
@@ -129,7 +129,7 @@ impl<M: Manager> Pool<M> {
 
     /// Return a state of the pool inner. This call will block the thread and wait for lock.
     pub fn state(&self) -> State {
-        self.pool.pool_lock.state()
+        self.pool.inner.state()
     }
 
     /// Return the thread id the pool is running on.(This is only useful when running the pool on single threads)
@@ -232,15 +232,15 @@ pub(crate) trait PoolRefBehavior<'a, M: Manager>
 where
     Self: DerefMut<Target = M::Connection> + Sized,
 {
-    fn from_idle(conn: IdleConn<M>, shared_pool: &'a SharedManagedPool<M>) -> Self;
+    fn from_conn(conn: Conn<M>, shared_pool: &'a SharedManagedPool<M>) -> Self;
 
     fn take_drop(self) {}
 }
 
 impl<'re, M: Manager> PoolRefBehavior<'re, M> for PoolRef<'re, M> {
-    fn from_idle(conn: IdleConn<M>, shared_pool: &'re SharedManagedPool<M>) -> Self {
+    fn from_conn(conn: Conn<M>, shared_pool: &'re SharedManagedPool<M>) -> Self {
         Self {
-            conn: Some(conn.into()),
+            conn: Some(conn),
             shared_pool,
         }
     }
@@ -251,9 +251,9 @@ impl<'re, M: Manager> PoolRefBehavior<'re, M> for PoolRef<'re, M> {
 }
 
 impl<M: Manager> PoolRefBehavior<'_, M> for PoolRefOwned<M> {
-    fn from_idle(conn: IdleConn<M>, shared_pool: &SharedManagedPool<M>) -> Self {
+    fn from_conn(conn: Conn<M>, shared_pool: &SharedManagedPool<M>) -> Self {
         Self {
-            conn: Some(conn.into()),
+            conn: Some(conn),
             shared_pool: WrapPointer::downgrade(shared_pool),
         }
     }
@@ -345,30 +345,30 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
         if is_closed || lifetime_check {
             self.spawn_drop();
         } else {
-            self.pool_lock.push_back(conn.into());
+            self.push_back(conn);
         };
     }
 
     // helper function to spawn drop connection and spawn new ones if needed.
     // Conn<M> should be dropped in place where spawn_drop() is used.
-    // ToDo: Will get unsolvable pending if the spawn is panic;
     #[cold]
     fn spawn_drop(&self) {
-        let opt = self.drop_conn();
+        let should_spawn_new = self.dec_active();
 
-        if let Some(pending) = opt {
-            let shared_clone = self.clone();
-            self.spawn(async move {
-                let _ = shared_clone.replenish_idle_conn(pending).await;
-            });
+        if should_spawn_new {
+            self.inc_active();
+            self.spawn_idle();
         }
     }
 
-    #[inline]
     fn spawn_idle(&self) {
-        let shared_clone = self.clone();
-        self.spawn(async move {
-            let _ = shared_clone.add_idle_conn().await;
+        let mut spawn_guard = SpawnGuardOwned::new(self.clone());
+        self.manager.spawn(async move {
+            let shared_pool = spawn_guard.shared_pool();
+            if let Ok(conn) = shared_pool.add().await {
+                shared_pool.push_back(conn);
+                spawn_guard.fulfilled();
+            };
         });
     }
 }
@@ -376,34 +376,34 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
 pub struct ManagedPool<M: Manager> {
     builder: Builder,
     manager: M,
-    pool_lock: PoolLock<M>,
+    inner: PoolInner<M>,
 }
 
 impl<M: Manager> ManagedPool<M> {
     fn new(builder: Builder, manager: M) -> Self {
-        let pool_lock = PoolLock::from_builder(&builder);
+        let inner = PoolInner::from_builder(&builder);
 
         Self {
             builder,
             manager,
-            pool_lock,
+            inner,
         }
     }
 
     #[inline]
-    async fn get_conn<'a, R>(&'a self, shared_pool: &'a SharedManagedPool<M>) -> Result<R, M::Error>
+    async fn _get<'a, R>(&'a self, shared_pool: &'a SharedManagedPool<M>) -> Result<R, M::Error>
     where
         R: PoolRefBehavior<'a, M> + Unpin,
     {
-        let fut = self.pool_lock.lock::<R>(shared_pool);
-        let timeout = self.builder.wait_timeout;
+        let fut = self.inner.get_inner::<R>(shared_pool);
+        let timeout = self.wait_timeout();
 
-        let mut pool_ref = self.manager.timeout(fut, timeout).await?;
+        let mut pool_ref = self.manager.timeout(fut, timeout).await??;
 
         if self.builder.always_check {
             let mut retry = 0u8;
             loop {
-                let result = self.check_conn(&mut pool_ref).await;
+                let result = self.valid_check(&mut pool_ref).await;
                 match result {
                     Ok(Ok(_)) => break,
                     Ok(Err(e)) => {
@@ -420,17 +420,18 @@ impl<M: Manager> ManagedPool<M> {
                     }
                 }
 
-                let fut = self.pool_lock.lock::<R>(shared_pool);
+                let fut = self.inner.get_inner::<R>(shared_pool);
 
-                pool_ref = self.manager.timeout(fut, timeout).await?;
+                pool_ref = self.manager.timeout(fut, timeout).await??;
             }
         };
 
         Ok(pool_ref)
     }
 
-    fn drop_conn(&self) -> Option<usize> {
-        self.pool_lock.dec_active()
+    #[inline]
+    fn push_back(&self, conn: Conn<M>) {
+        self.inner.push_back(conn);
     }
 
     #[inline]
@@ -441,73 +442,75 @@ impl<M: Manager> ManagedPool<M> {
         }
     }
 
-    pub(crate) async fn add_idle_conn(&self) -> Result<(), M::Error> {
+    pub(crate) async fn add(&self) -> Result<Conn<M>, M::Error> {
         let fut = self.manager.connect();
-        let timeout = self.builder.connection_timeout;
+        let timeout = self.connection_timeout();
 
         let conn = self
             .manager
             .timeout(fut, timeout)
             .await
             .map_err(|e| {
-                self.pool_lock.dec_pending(1);
+                self.dec_active();
                 e
             })?
             .map_err(|e| {
-                self.pool_lock.dec_pending(1);
+                self.dec_active();
                 e
             })?;
 
-        self.pool_lock.push_new(IdleConn::new(conn));
-
-        Ok(())
+        Ok(Conn::new(conn))
     }
 
-    async fn check_conn(&self, conn: &mut M::Connection) -> Result<Result<(), M::Error>, M::Error> {
+    async fn valid_check(
+        &self,
+        conn: &mut M::Connection,
+    ) -> Result<Result<(), M::Error>, M::Error> {
         let fut = self.manager.is_valid(conn);
-
-        let timeout = self.builder.connection_timeout;
+        let timeout = self.connection_timeout();
 
         let res = self.manager.timeout(fut, timeout).await?;
 
         Ok(res)
     }
 
-    async fn replenish_idle_conn(&self, pending_count: usize) -> Result<(), M::Error> {
-        for i in 0..pending_count {
-            self.add_idle_conn().await.map_err(|e| {
-                // we return when an error occur so we should drop all the pending after the i.
-                // (the pending of i is already dropped in add_connection method)
-                let count = pending_count - i - 1;
-                if count > 0 {
-                    self.pool_lock.dec_pending(count);
-                };
-                e
-            })?;
+    async fn add_multi(&self, count: usize) -> Result<(), M::Error> {
+        for _ in 0..count {
+            self.inner.inc_active();
+            let conn = self.add().await?;
+            self.inner.push_back(conn);
         }
 
         Ok(())
     }
 
-    #[cfg(not(feature = "no-send"))]
-    pub(crate) fn spawn<Fut>(&self, fut: Fut)
-    where
-        Fut: Future<Output = ()> + Send + 'static,
-    {
-        self.manager.spawn(fut);
-    }
-
-    #[cfg(feature = "no-send")]
-    pub(crate) fn spawn<Fut>(&self, fut: Fut)
-    where
-        Fut: Future<Output = ()> + 'static,
-    {
-        self.manager.spawn(fut);
+    // a hack to return Manager::TimeoutError immediately.
+    pub(crate) async fn timeout_now(&self) -> Result<(), M::Error> {
+        let fut = async {};
+        let timeout = Duration::from_nanos(0);
+        let _ = self.manager.timeout(fut, timeout).await?;
+        Ok(())
     }
 
     /// expose `Builder` to public
     pub fn get_builder(&self) -> &Builder {
         &self.builder
+    }
+
+    pub(crate) fn dec_active(&self) -> bool {
+        self.inner.dec_active()
+    }
+
+    pub(crate) fn inc_active(&self) {
+        self.inner.inc_active();
+    }
+
+    fn connection_timeout(&self) -> Duration {
+        self.builder.connection_timeout
+    }
+
+    fn wait_timeout(&self) -> Duration {
+        self.builder.wait_timeout
     }
 }
 
@@ -520,36 +523,9 @@ pub struct Conn<M: Manager> {
     birth: Instant,
 }
 
-pub struct IdleConn<M: Manager> {
-    conn: Conn<M>,
-    // idle_start: Instant,
-}
-
-impl<M: Manager> IdleConn<M> {
+impl<M: Manager> Conn<M> {
     fn new(conn: M::Connection) -> Self {
         let now = Instant::now();
-        IdleConn {
-            conn: Conn { conn, birth: now },
-            // idle_start: now,
-        }
-    }
-}
-
-impl<M: Manager> From<Conn<M>> for IdleConn<M> {
-    fn from(conn: Conn<M>) -> IdleConn<M> {
-        // let now = Instant::now();
-        IdleConn {
-            conn,
-            // idle_start: now,
-        }
-    }
-}
-
-impl<M: Manager> From<IdleConn<M>> for Conn<M> {
-    fn from(conn: IdleConn<M>) -> Conn<M> {
-        Conn {
-            conn: conn.conn.conn,
-            birth: conn.conn.birth,
-        }
+        Self { conn, birth: now }
     }
 }

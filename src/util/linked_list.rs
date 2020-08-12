@@ -163,12 +163,10 @@ pub(crate) mod linked_list_lock {
     use core::ops::{Deref, DerefMut};
 
     #[cfg(not(feature = "no-send"))]
-    use {
-        crate::util::backoff::Backoff,
-        core::sync::atomic::{AtomicUsize, Ordering},
-    };
+    use core::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{ListAPI, WakerList};
+    use crate::util::backoff::Backoff;
 
     /// `WakerListLock` is a spin lock by default. It stores the head of the LinkedList
     /// In `no-send` feature it is a wrapper of `Cell` where the thread will panic if concurrent access happen

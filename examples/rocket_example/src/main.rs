@@ -27,7 +27,7 @@ const IDS: &[u32] = &[
 
 #[rocket::main]
 async fn main() {
-    let db_url = "postgres://postgres:123@localhost/test";
+    let db_url = "postgres://postgres:123@localhost/test2";
 
     // setup manager
     let mgr = PostgresManager::new_from_stringlike(db_url, tokio_postgres::NoTls)

@@ -79,8 +79,8 @@
 //!     }
 //!
 //!     fn spawn<Fut>(&self, fut: Fut)
-//!         where
-//!             Fut: Future<Output = ()> + Send + 'static,
+//!     where
+//!         Fut: Future<Output = ()> + Send + 'static,
 //!     {
 //!         // some pool inner functions would want to spawn on your executor.
 //!         // you can use the handler to further manage them if you want.
@@ -122,12 +122,7 @@
 //!             let conn_ref = &mut *pool_ref;
 //!
 //!             let _ = tx.send(*conn_ref);
-//!         });
-//!     }
-//!     drop(tx);
-//!
-//!     while let Ok(_connection) = rx.recv().await {
-//!         // We just wait until all connections are pulled out once
+//!         }).await;
 //!     }
 //! }
 //!```

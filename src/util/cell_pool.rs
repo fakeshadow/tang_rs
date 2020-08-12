@@ -7,7 +7,6 @@ use crate::util::pool_error::PopError;
 
 /// `CellPool` is just a wrapper for `Cell/UnsafeCell` and would panic at runtime if concurrent access happen
 pub struct CellPool<T> {
-    // false means pool is free. true means pool is locked
     state: Cell<State<T>>,
 }
 
@@ -19,7 +18,6 @@ enum State<T> {
 struct StateInner<T> {
     max_size: usize,
     active: usize,
-    pending: usize,
     conn: VecDeque<T>,
 }
 
@@ -30,7 +28,6 @@ impl<T> CellPool<T> {
             state: Cell::new(State::Free(StateInner {
                 max_size,
                 active: 0,
-                pending: 0,
                 conn: VecDeque::with_capacity(max_size),
             })),
         }
@@ -84,25 +81,15 @@ impl<T> CellPool<T> {
     }
 
     #[inline]
-    pub(crate) fn push_new(&self, value: T) {
-        let mut guard = self.guard();
-
-        guard.pending -= 1;
-        guard.active += 1;
-
-        guard.conn.push_back(value);
-    }
-
-    #[inline]
-    pub(crate) fn pop(&self) -> Result<T, PopError> {
+    pub(crate) fn pop(&self) -> Result<T, PopError<T>> {
         let mut guard = self.guard();
 
         match guard.conn.pop_front() {
             Some(conn) => Ok(conn),
             None => {
-                if guard.active + guard.pending < guard.max_size {
-                    guard.pending += 1;
-                    Err(PopError::SpawnNow)
+                if guard.active < guard.max_size {
+                    guard.active += 1;
+                    Err(PopError::spawn_now(self))
                 } else {
                     Err(PopError::Empty)
                 }
@@ -110,34 +97,19 @@ impl<T> CellPool<T> {
         }
     }
 
-    pub(crate) fn dec_pending(&self, count: usize) {
-        let mut guard = self.guard();
-        guard.pending -= count;
-    }
-
-    pub(crate) fn inc_pending(&self, count: usize) {
-        let mut guard = self.guard();
-        guard.pending += count;
-    }
-
-    // would return new active + pending count
+    // would return new active count
     pub(crate) fn dec_active(&self, count: usize) -> usize {
         let mut guard = self.guard();
 
         guard.active -= count;
 
-        guard.active + guard.pending
+        guard.active
     }
 
-    // pub(crate) fn len(&self) -> usize {
-    //     let guard = self.guard();
-    //     guard.conn.len()
-    // }
-
-    /// Returns items in queue, active and pending count in tuple
-    pub(crate) fn state(&self) -> (usize, usize, usize) {
+    /// Returns items in queue, active ount in tuple
+    pub(crate) fn state(&self) -> (usize, usize) {
         let guard = self.guard();
 
-        (guard.conn.len(), guard.active, guard.pending)
+        (guard.conn.len(), guard.active)
     }
 }

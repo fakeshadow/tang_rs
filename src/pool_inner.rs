@@ -9,7 +9,7 @@ use core::task::{Context, Poll};
 use crate::util::cell_pool::CellPool;
 
 #[cfg(not(feature = "no-send"))]
-use crate::util::lock_free_pool::PoolInner;
+use crate::util::atomic_pool::AtomicPool;
 
 use crate::util::{
     backoff::Backoff,
@@ -18,50 +18,51 @@ use crate::util::{
         WakerList,
     },
     pool_error::PopError,
+    spawn_guard::SpawnGuard,
 };
 use crate::{
     builder::Builder,
     manager::Manager,
-    pool::{DropAndSpawn, IdleConn, PoolRefBehavior},
+    pool::{Conn, DropAndSpawn, PoolRefBehavior},
     SharedManagedPool,
 };
 
-macro_rules! pool_lock {
+macro_rules! pool_inner {
     ($pool_ty: ident) => {
-        pub(crate) struct PoolLock<M: Manager> {
-            inner: $pool_ty<IdleConn<M>>,
-            waiters: WakerListLock<WakerList>,
-            state: PoolLockState,
+        pub(crate) struct PoolInner<M: Manager> {
+            pool: $pool_ty<Conn<M>>,
+            waiter: WakerListLock<WakerList>,
+            state: PoolInnerState,
         }
 
-        impl<M: Manager> PoolLock<M> {
+        impl<M: Manager> PoolInner<M> {
             pub(crate) fn from_builder(builder: &Builder) -> Self {
                 Self {
-                    inner: $pool_ty::new(builder.max_size),
-                    waiters: WakerListLock::new(WakerList::new()),
-                    state: PoolLockState::from_builder(builder),
+                    pool: $pool_ty::new(builder.max_size),
+                    waiter: WakerListLock::new(WakerList::new()),
+                    state: PoolInnerState::from_builder(builder),
                 }
             }
 
             #[inline]
             pub(crate) fn lock_waiter(&self) -> WakerListGuard<'_, WakerList> {
-                self.waiters.lock()
+                self.waiter.lock()
             }
         }
     };
 }
 
 #[cfg(not(feature = "no-send"))]
-pool_lock!(PoolInner);
+pool_inner!(AtomicPool);
 
 #[cfg(feature = "no-send")]
-pool_lock!(CellPool);
+pool_inner!(CellPool);
 
-pub(crate) struct PoolLockState {
+pub(crate) struct PoolInnerState {
     min_idle: usize,
 }
 
-impl PoolLockState {
+impl PoolInnerState {
     fn from_builder(builder: &Builder) -> Self {
         Self {
             min_idle: builder.min_idle,
@@ -69,51 +70,56 @@ impl PoolLockState {
     }
 }
 
-impl<M: Manager> PoolLock<M> {
+impl<M: Manager> PoolInner<M> {
     #[inline]
-    pub(crate) async fn lock<'a, R>(&'a self, shared_pool: &'a SharedManagedPool<M>) -> R
+    pub(crate) async fn get_inner<'a, R>(
+        &'a self,
+        shared_pool: &'a SharedManagedPool<M>,
+    ) -> Result<R, M::Error>
     where
         R: PoolRefBehavior<'a, M> + Unpin,
     {
         let res = self
-            .inner
+            .pool
             .pop()
-            .map(|conn| R::from_idle(conn, shared_pool))
-            .map_err(|e| {
-                // spawn according to error.
-                if e.is_spawn_now() {
-                    shared_pool.spawn_idle();
-                }
+            .map(|conn| R::from_conn(conn, shared_pool))
+            .map_err(|e| match e {
+                PopError::SpawnNow => Some(SpawnGuard::new(shared_pool)),
+                _ => None,
             });
 
         match res {
-            Ok(r) => r,
-            Err(_) => {
-                PoolLockFuture {
+            Ok(r) => Ok(r),
+            Err(opt) => match opt {
+                Some(mut guard) => shared_pool.add().await.map(|conn| {
+                    guard.fulfilled();
+                    R::from_conn(conn, shared_pool)
+                }),
+                None => Ok(PoolInnerFuture {
                     shared_pool,
-                    pool_lock: self,
+                    pool_inner: self,
                     wait_key: None,
                     _r: PhantomData,
                 }
-                .await
-            }
+                .await),
+            },
         }
     }
 
-    // ToDo: for now this call does not check the running state of pool inner.
-    pub(crate) fn lock_sync<'a, R>(&'a self, shared_pool: &'a SharedManagedPool<M>) -> R
+    // ToDo: for now this call does not check the running state of pool.
+    pub(crate) fn get_inner_sync<'a, R>(&'a self, shared_pool: &'a SharedManagedPool<M>) -> R
     where
         R: PoolRefBehavior<'a, M>,
     {
         let backoff = Backoff::new();
 
         loop {
-            match self.inner.pop() {
+            match self.pool.pop() {
                 Ok(conn) => {
-                    return R::from_idle(conn, shared_pool);
+                    return R::from_conn(conn, shared_pool);
                 }
                 Err(e) => {
-                    if PopError::SpawnNow == e {
+                    if e.is_spawn_now() {
                         shared_pool.spawn_idle();
                     }
                 }
@@ -122,37 +128,18 @@ impl<M: Manager> PoolLock<M> {
         }
     }
 
-    // add pending directly to pool inner if we try to spawn new connections.
-    // and return the new pending count as option to notify the Pool to replenish connections
-    pub(crate) fn dec_active(&self) -> Option<usize> {
-        let total = self.inner.dec_active(1);
-        let self_min = self.min_idle();
-
-        if total < self_min {
-            let pending_new = self_min - total;
-            self.inner.inc_pending(pending_new);
-            Some(pending_new)
-        } else {
-            None
-        }
+    // return true if we should spawn new.
+    pub(crate) fn dec_active(&self) -> bool {
+        self.pool.dec_active(1) < self.min_idle()
     }
 
-    pub(crate) fn dec_pending(&self, count: usize) {
-        self.inner.dec_pending(count);
-    }
-
-    pub(crate) fn inc_pending(&self, count: usize) {
-        self.inner.inc_pending(count);
+    pub(crate) fn inc_active(&self) {
+        self.pool.inc_active(1);
     }
 
     #[inline]
-    pub(crate) fn push_back(&self, conn: IdleConn<M>) {
-        self.inner.push_back(conn);
-        self.lock_waiter().wake_one();
-    }
-
-    pub(crate) fn push_new(&self, conn: IdleConn<M>) {
-        self.inner.push_new(conn);
+    pub(crate) fn push_back(&self, conn: Conn<M>) {
+        self.pool.push_back(conn);
         self.lock_waiter().wake_one();
     }
 
@@ -161,28 +148,27 @@ impl<M: Manager> PoolLock<M> {
     }
 
     pub(crate) fn state(&self) -> State {
-        let (idle_connections, connections, pending_connections) = self.inner.state();
+        let (idle_connections, connections) = self.pool.state();
 
         State {
             connections,
             idle_connections,
-            pending_connections,
         }
     }
 }
 
-pub(crate) struct PoolLockFuture<'a, M: Manager, R>
+pub(crate) struct PoolInnerFuture<'a, M: Manager, R>
 where
     M: Manager,
     R: PoolRefBehavior<'a, M>,
 {
     shared_pool: &'a SharedManagedPool<M>,
-    pool_lock: &'a PoolLock<M>,
+    pool_inner: &'a PoolInner<M>,
     wait_key: Option<NonZeroUsize>,
     _r: PhantomData<R>,
 }
 
-impl<'a, M, R> Drop for PoolLockFuture<'a, M, R>
+impl<'a, M, R> Drop for PoolInnerFuture<'a, M, R>
 where
     M: Manager,
     R: PoolRefBehavior<'a, M>,
@@ -194,13 +180,13 @@ where
     }
 }
 
-impl<'a, M: Manager, R> PoolLockFuture<'a, M, R>
+impl<'a, M: Manager, R> PoolInnerFuture<'a, M, R>
 where
     R: PoolRefBehavior<'a, M>,
 {
     #[cold]
     fn wake_cold(&self, wait_key: NonZeroUsize) {
-        let mut waiters = self.pool_lock.lock_waiter();
+        let mut waiters = self.pool_inner.lock_waiter();
 
         let wait_key = unsafe { waiters.remove(wait_key) };
 
@@ -211,7 +197,7 @@ where
     }
 }
 
-impl<'re, M, R> Future for PoolLockFuture<'re, M, R>
+impl<'re, M, R> Future for PoolInnerFuture<'re, M, R>
 where
     M: Manager,
     R: PoolRefBehavior<'re, M> + Unpin,
@@ -220,33 +206,24 @@ where
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let shared_pool = self.shared_pool;
-        let pool_lock = self.pool_lock;
+        let pool_inner = self.pool_inner;
 
         // insert or update wait key.
         match self.wait_key {
-            None => {
-                let wait_key = pool_lock.lock_waiter().insert(Some(cx.waker().clone()));
-                self.wait_key = Some(wait_key);
-            }
             Some(wait_key) => {
-                match pool_lock.inner.pop() {
+                match pool_inner.pool.pop() {
                     Ok(conn) => {
-                        let r = R::from_idle(conn, shared_pool);
+                        let r = R::from_conn(conn, shared_pool);
 
                         // remove self from waiter list
-                        unsafe { pool_lock.lock_waiter().remove(wait_key) };
+                        unsafe { pool_inner.lock_waiter().remove(wait_key) };
                         self.wait_key = None;
 
                         return Poll::Ready(r);
                     }
-                    Err(e) => {
-                        // spawn according to error.
-                        if e.is_spawn_now() {
-                            shared_pool.spawn_idle();
-                        }
-
+                    Err(_) => {
                         // insert or update wait key.
-                        let mut waiters = pool_lock.lock_waiter();
+                        let mut waiters = pool_inner.lock_waiter();
                         let opt = unsafe { waiters.get(wait_key) };
                         // We replace the waker if we are woken and have no waker in waiter list or have a new context which will not wake the old waker.
                         if opt
@@ -259,6 +236,10 @@ where
                     }
                 }
             }
+            None => {
+                let wait_key = pool_inner.lock_waiter().insert(Some(cx.waker().clone()));
+                self.wait_key = Some(wait_key);
+            }
         }
 
         Poll::Pending
@@ -266,15 +247,14 @@ where
 }
 
 #[cfg(not(feature = "no-send"))]
-unsafe impl<M: Manager + Send> Send for PoolLock<M> {}
+unsafe impl<M: Manager + Send> Send for PoolInner<M> {}
 
 #[cfg(not(feature = "no-send"))]
-unsafe impl<M: Manager + Send> Sync for PoolLock<M> {}
+unsafe impl<M: Manager + Send> Sync for PoolInner<M> {}
 
 pub struct State {
     pub connections: usize,
     pub idle_connections: usize,
-    pub pending_connections: usize,
 }
 
 impl fmt::Debug for State {
@@ -282,7 +262,6 @@ impl fmt::Debug for State {
         fmt.debug_struct("State")
             .field("connections", &self.connections)
             .field("idle_connections", &self.idle_connections)
-            .field("pending_connections", &self.pending_connections)
             .finish()
     }
 }

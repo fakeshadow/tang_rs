@@ -15,7 +15,7 @@ use tokio_postgres_tang::{Builder, Pool, PostgresManager};
 
 // use once cell for a static tokio-postgres pool. so we don't have to pass the pool to App::data
 static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
-    let db_url = "postgres://postgres:123@localhost/test";
+    let db_url = "postgres://postgres:123@localhost/test2";
 
     let mgr = PostgresManager::new_from_stringlike(db_url, NoTls)
         .expect("can't make postgres manager")
@@ -28,8 +28,8 @@ static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
 
     Builder::new()
         .always_check(false)
-        .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
-        .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
+        .idle_timeout(None)
+        .max_lifetime(None)
         .min_idle(0)
         .max_size(24)
         .build_uninitialized(mgr)
@@ -45,8 +45,6 @@ async fn main() -> std::io::Result<()> {
     let mgr = RedisManager::new("redis://127.0.0.1");
     let pool_redis = Builder::new()
         .always_check(false)
-        // .idle_timeout(Some(std::time::Duration::from_secs(10 * 60)))
-        // .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
         .idle_timeout(None)
         .max_lifetime(None)
         .min_idle(0)

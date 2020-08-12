@@ -91,7 +91,7 @@ async fn limit() {
         .await
         .expect("fail to build pool");
 
-    pool_state(&pool, 10, 10, 0);
+    pool_state(&pool, 10, 10);
 
     let mut conns = Vec::new();
 
@@ -104,13 +104,12 @@ async fn limit() {
 
     assert_eq!(24, conns.len());
 
-    assert_eq!(0, state.pending_connections);
     assert_eq!(24, state.connections);
     assert_eq!(0, state.idle_connections);
 
     drop(conns);
 
-    pool_state(&pool, 12, 12, 0);
+    pool_state(&pool, 12, 12);
 }
 
 #[tokio::test]
@@ -155,7 +154,7 @@ async fn valid_closed() {
 
     interval.tick().await;
 
-    pool_state(&pool, 4, 4, 0);
+    pool_state(&pool, 4, 4);
 }
 
 #[tokio::test]
@@ -202,7 +201,7 @@ async fn retry_limit() {
 
     interval.tick().await;
 
-    pool_state(&pool, 4, 4, 0);
+    pool_state(&pool, 4, 4);
 }
 
 // #[tokio::test]
@@ -229,11 +228,11 @@ async fn retry_limit() {
 //     assert_eq!(8, conns.len());
 //     drop(conns);
 //
-//     pool_state(&pool, 4, 4, 0);
+//     pool_state(&pool, 4, 4;
 //
 //     delay_for(Duration::from_secs(6)).await;
 //
-//     pool_state(&pool, 2, 2, 0);
+//     pool_state(&pool, 2, 2);
 // }
 
 #[tokio::test]
@@ -263,7 +262,7 @@ async fn max_lifetime() {
 
     delay_for(Duration::from_secs(1)).await;
 
-    pool_state(&pool, 2, 2, 0);
+    pool_state(&pool, 2, 2);
 }
 
 // #[tokio::test]
@@ -305,7 +304,7 @@ async fn max_lifetime() {
 //
 //     drop(conns);
 //
-//     pool_state(&pool, 0, 0, 0);
+//     pool_state(&pool, 0, 0);
 //
 //     pool.resume();
 //
@@ -319,13 +318,13 @@ async fn max_lifetime() {
 //
 //     pool.pause();
 //
-//     pool_state(&pool, 16, 16, 0);
+//     pool_state(&pool, 16, 16);
 //
 //     pool.resume();
 //
 //     delay_for(Duration::from_secs(3)).await;
 //
-//     pool_state(&pool, 8, 8, 0);
+//     pool_state(&pool, 8, 8);
 // }
 
 // #[tokio::test]
@@ -352,7 +351,7 @@ async fn max_lifetime() {
 //
 //     drop(conns);
 //
-//     pool_state(&pool, 7, 7, 0);
+//     pool_state(&pool, 7, 7);
 // }
 
 // #[tokio::test]
@@ -373,7 +372,7 @@ async fn max_lifetime() {
 //
 //     delay_for(Duration::from_secs(3)).await;
 //
-//     pool_state(&pool, 7, 7, 0);
+//     pool_state(&pool, 7, 7);
 // }
 //
 // #[tokio::test]
@@ -396,11 +395,11 @@ async fn max_lifetime() {
 //         conns.push(conn);
 //     }
 //
-//     pool_state(&pool, 16, 8, 0);
+//     pool_state(&pool, 16, 8);
 //
 //     pool.clear();
 //
-//     pool_state(&pool, 8, 0, 0);
+//     pool_state(&pool, 8, 0);
 //
 //     let mut pool_ref = conns.pop().unwrap();
 //     let _ = pool_ref.take_conn();
@@ -414,7 +413,7 @@ async fn max_lifetime() {
 //
 //     drop(conns);
 //
-//     pool_state(&pool, 0, 0, 0);
+//     pool_state(&pool, 0, 0);
 // }
 
 #[tokio::test]
@@ -462,10 +461,9 @@ async fn max_sync() {
     let _ = rx.await;
 }
 
-fn pool_state<M: Manager>(pool: &Pool<M>, conn: usize, idle: usize, pending: usize) {
+fn pool_state<M: Manager>(pool: &Pool<M>, conn: usize, idle: usize) {
     let state = pool.state();
 
     assert_eq!(conn, state.connections);
     assert_eq!(idle, state.idle_connections);
-    assert_eq!(pending, state.pending_connections);
 }
