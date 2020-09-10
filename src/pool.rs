@@ -442,26 +442,6 @@ impl<M: Manager> ManagedPool<M> {
         }
     }
 
-    pub(crate) async fn add(&self) -> Result<Conn<M>, M::Error> {
-        let fut = self.manager.connect();
-        let timeout = self.connection_timeout();
-
-        let conn = self
-            .manager
-            .timeout(fut, timeout)
-            .await
-            .map_err(|e| {
-                self.dec_active();
-                e
-            })?
-            .map_err(|e| {
-                self.dec_active();
-                e
-            })?;
-
-        Ok(Conn::new(conn))
-    }
-
     async fn valid_check(
         &self,
         conn: &mut M::Connection,
@@ -474,23 +454,30 @@ impl<M: Manager> ManagedPool<M> {
         Ok(res)
     }
 
+    pub(crate) async fn add(&self) -> Result<Conn<M>, M::Error> {
+        let fut = self.manager.connect();
+        let timeout = self.connection_timeout();
+
+        self.manager.timeout(fut, timeout).await?.map(Conn::new)
+    }
+
     async fn add_multi(&self, count: usize) -> Result<(), M::Error> {
         for _ in 0..count {
-            self.inner.inc_active();
             let conn = self.add().await?;
             self.inner.push_back(conn);
+            self.inner.inc_active();
         }
 
         Ok(())
     }
 
     // a hack to return Manager::TimeoutError immediately.
-    pub(crate) async fn timeout_now(&self) -> Result<(), M::Error> {
-        let fut = async {};
-        let timeout = Duration::from_nanos(0);
-        let _ = self.manager.timeout(fut, timeout).await?;
-        Ok(())
-    }
+    // pub(crate) async fn timeout_now(&self) -> Result<(), M::Error> {
+    //     let fut = async {};
+    //     let timeout = Duration::from_nanos(0);
+    //     let _ = self.manager.timeout(fut, timeout).await?;
+    //     Ok(())
+    // }
 
     /// expose `Builder` to public
     pub fn get_builder(&self) -> &Builder {

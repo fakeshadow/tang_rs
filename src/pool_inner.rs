@@ -84,7 +84,7 @@ impl<M: Manager> PoolInner<M> {
             .pop()
             .map(|conn| R::from_conn(conn, shared_pool))
             .map_err(|e| match e {
-                PopError::SpawnNow => Some(SpawnGuard::new(shared_pool)),
+                PopError::SpawnNow => Some(SpawnGuard::new(self)),
                 _ => None,
             });
 
@@ -106,7 +106,6 @@ impl<M: Manager> PoolInner<M> {
         }
     }
 
-    // ToDo: for now this call does not check the running state of pool.
     pub(crate) fn get_inner_sync<'a, R>(&'a self, shared_pool: &'a SharedManagedPool<M>) -> R
     where
         R: PoolRefBehavior<'a, M>,

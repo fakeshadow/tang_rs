@@ -8,6 +8,7 @@ use crate::util::pool_error::PopError;
 /// `CellPool` is just a wrapper for `Cell/UnsafeCell` and would panic at runtime if concurrent access happen
 pub struct CellPool<T> {
     state: Cell<State<T>>,
+
 }
 
 enum State<T> {
@@ -81,7 +82,7 @@ impl<T> CellPool<T> {
     }
 
     #[inline]
-    pub(crate) fn pop(&self) -> Result<T, PopError<T>> {
+    pub(crate) fn pop(&self) -> Result<T, PopError> {
         let mut guard = self.guard();
 
         match guard.conn.pop_front() {
@@ -89,7 +90,7 @@ impl<T> CellPool<T> {
             None => {
                 if guard.active < guard.max_size {
                     guard.active += 1;
-                    Err(PopError::spawn_now(self))
+                    Err(PopError::SpawnNow)
                 } else {
                     Err(PopError::Empty)
                 }
@@ -104,6 +105,11 @@ impl<T> CellPool<T> {
         guard.active -= count;
 
         guard.active
+    }
+
+    pub(crate) fn inc_active(&self, count: usize)  {
+        let mut guard = self.guard();
+        guard.active += count;
     }
 
     /// Returns items in queue, active ount in tuple

@@ -1,4 +1,5 @@
 use crate::{Manager, SharedManagedPool};
+use crate::pool_inner::PoolInner;
 
 // use a guard type to monitor the spawn result.
 // this is necessary as spawn process is a future that can be canceled.
@@ -6,7 +7,7 @@ pub(crate) struct SpawnGuard<'a, M>
 where
     M: Manager,
 {
-    shared_pool: &'a SharedManagedPool<M>,
+    pool_inner: &'a PoolInner<M>,
     fulfilled: bool,
 }
 
@@ -14,9 +15,9 @@ impl<'a, M> SpawnGuard<'a, M>
 where
     M: Manager,
 {
-    pub(crate) fn new(shared_pool: &'a SharedManagedPool<M>) -> Self {
+    pub(crate) fn new(pool_inner: &'a PoolInner<M>) -> Self {
         Self {
-            shared_pool,
+            pool_inner,
             fulfilled: false,
         }
     }
@@ -32,7 +33,7 @@ where
 {
     fn drop(&mut self) {
         if !self.fulfilled {
-            self.shared_pool.dec_active();
+            self.pool_inner.dec_active();
         }
     }
 }

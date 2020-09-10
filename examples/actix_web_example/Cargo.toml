@@ -6,8 +6,7 @@ edition = "2018"
 publish = false
 
 [dependencies]
-actix-rt = "1.1.0"
-actix-web = { git = "https://github.com/actix/actix-web.git" }
+actix-web = "3.0.0-beta.3"
 futures-util = "0.3.5"
 once_cell = "1.4.0"
 redis = { version = "0.16.0", default-features = false, features = ["tokio-rt-core"] }

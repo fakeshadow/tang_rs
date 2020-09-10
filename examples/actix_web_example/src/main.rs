@@ -30,12 +30,12 @@ static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
         .always_check(false)
         .idle_timeout(None)
         .max_lifetime(None)
-        .min_idle(0)
+        .min_idle(24)
         .max_size(24)
         .build_uninitialized(mgr)
 });
 
-#[actix_rt::main]
+#[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // initialize tokio-postgres pool.
     POOL.init()

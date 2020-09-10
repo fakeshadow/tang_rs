@@ -166,7 +166,6 @@ pub(crate) mod linked_list_lock {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use super::{ListAPI, WakerList};
-    use crate::util::backoff::Backoff;
 
     /// `WakerListLock` is a spin lock by default. It stores the head of the LinkedList
     /// In `no-send` feature it is a wrapper of `Cell` where the thread will panic if concurrent access happen
@@ -230,7 +229,7 @@ pub(crate) mod linked_list_lock {
     #[cfg(not(feature = "no-send"))]
     impl<T: ListAPI> WakerListLock<T> {
         pub(crate) fn lock(&self) -> WakerListGuard<'_, T> {
-            let backoff = Backoff::new();
+            let backoff = crate::util::backoff::Backoff::new();
             loop {
                 let value = self.head.swap(1, Ordering::Acquire);
                 if value != 1 {
