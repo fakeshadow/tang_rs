@@ -6,11 +6,11 @@ edition = "2018"
 publish = false
 
 [dependencies.async-std]
-version = "1.5.0"
+version = "1.6.4"
 features = ["attributes"]
 
 [dependencies.futures-util]
-version = "0.3.4"
+version = "0.3.5"
 
 [dependencies.redis]
 version = "0.16.0"
@@ -23,10 +23,10 @@ default-features = false
 features = ["with-async-std"]
 
 [dependencies.tide]
-version = "0.8.0"
+version = "0.8.1"
 
 [dependencies.tokio-postgres]
-version = "0.5.3"
+version = "0.5.5"
 
 [dependencies.tokio_postgres_tang]
 path = "../../tokio_postgres_tang"

@@ -11,12 +11,12 @@ with-async-std = ["tang-rs", "async-postgres", "async-std/unstable", "smol", "to
 with-ntex = [ "tang-rs/no-send", "tokio/time", "tokio/rt-util", "tokio-postgres/runtime"]
 
 [dependencies.async-postgres]
-version = "0.5.0"
+version = "0.5.1"
 default-features = false
 optional = true
 
 [dependencies.async-std]
-version = "1.6.2"
+version = "1.6.4"
 default-features = false
 optional = true
 
@@ -25,7 +25,7 @@ version = "0.3.4"
 default-features = false
 
 [dependencies.smol]
-version = "0.1.10"
+version = "0.3.3"
 optional = true
 
 [dependencies.tang-rs]
@@ -34,10 +34,10 @@ default-features = false
 optional = true
 
 [dependencies.tokio-postgres]
-version = "0.5.4"
+version = "0.5.5"
 optional = true
 
 [dependencies.tokio]
-version = "0.2.21"
+version = "0.2.22"
 default-features = false
 optional = true

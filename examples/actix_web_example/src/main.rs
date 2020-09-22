@@ -30,7 +30,7 @@ static POOL: Lazy<Pool<PostgresManager<NoTls>>> = Lazy::new(|| {
         .always_check(false)
         .idle_timeout(None)
         .max_lifetime(None)
-        .min_idle(24)
+        .min_idle(0)
         .max_size(24)
         .build_uninitialized(mgr)
 });

@@ -4,12 +4,12 @@
 //! * `with-async-std` - run on `smol` runtime.
 //! * `with-ntex` - run on `ntex` and `actix` runtime
 
+#[forbid(unsafe_code)]
+
 use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-#[cfg(feature = "with-async-std")]
-use async_std::prelude::StreamExt;
 use redis::{aio::MultiplexedConnection, Client, IntoConnectionInfo, RedisError};
 
 pub use tang_rs::{Builder, Pool, PoolRef, PoolRefOwned};
@@ -111,7 +111,7 @@ manager!(
     async_std::task::spawn,
     smol::Timer,
     std::time::Instant,
-    smol::Timer::after
+    smol::Timer::new
 );
 
 impl std::fmt::Debug for RedisManager {

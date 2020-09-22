@@ -76,16 +76,28 @@
 //!}
 //!```
 
+#![forbid(unsafe_code)]
+
+use core::fmt;
+use core::future::Future;
+use core::pin::Pin;
+use core::str::FromStr;
+use core::time::Duration;
+
 use std::collections::HashMap;
-use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
-use std::str::FromStr;
 use std::sync::RwLock;
-use std::time::Duration;
 
 use futures_util::{future::join_all, TryFutureExt};
 use tokio_postgres::Client;
+
+#[cfg(feature = "with-async-std")]
+use async_postgres::{
+    tls::{MakeTlsConnect, TlsConnect},
+    types::Type,
+    Config, Error, Socket, Statement,
+};
+pub use tang_rs::{Builder, Pool, PoolRef, PoolRefOwned};
+use tang_rs::{Manager, ManagerFuture, ManagerTimeout};
 #[cfg(not(feature = "with-async-std"))]
 use tokio_postgres::{
     tls::{MakeTlsConnect, TlsConnect},
@@ -93,31 +105,13 @@ use tokio_postgres::{
     Config, Error, Socket, Statement,
 };
 
-pub use tang_rs::{Builder, Pool, PoolRef, PoolRefOwned};
-use tang_rs::{Manager, ManagerFuture, ManagerTimeout};
-#[cfg(feature = "with-async-std")]
-use {
-    async_postgres::{
-        tls::{MakeTlsConnect, TlsConnect},
-        types::Type,
-        Config, Error, Socket, Statement,
-    },
-    async_std::prelude::StreamExt,
-};
-
-pub struct PostgresManager<Tls>
-where
-    Tls: MakeTlsConnect<Socket>,
-{
+pub struct PostgresManager<Tls> {
     config: Config,
     tls: Tls,
     prepares: RwLock<PreparedHashMap>,
 }
 
-impl<Tls> PostgresManager<Tls>
-where
-    Tls: MakeTlsConnect<Socket>,
-{
+impl<Tls> PostgresManager<Tls> {
     /// Create a new `PostgresManager` with the specified `config`.
     /// prepared statements can be passed when connecting to speed up frequent used queries.
     pub fn new(config: Config, tls: Tls) -> PostgresManager<Tls> {
@@ -131,10 +125,9 @@ where
     /// Create a new `PostgresManager`, parsing the config from `params`.
     pub fn new_from_stringlike<T>(params: T, tls: Tls) -> Result<PostgresManager<Tls>, Error>
     where
-        T: ToString,
+        T: AsRef<str>,
     {
-        let stringified_params = params.to_string();
-        let config = Config::from_str(&stringified_params)?;
+        let config = Config::from_str(params.as_ref())?;
         Ok(Self::new(config, tls))
     }
 
@@ -255,6 +248,7 @@ macro_rules! manager {
 }
 
 #[cfg(feature = "with-ntex")]
+#[cfg(not(any(feature = "with-tokio", features = "with-async-std")))]
 manager!(
     (Client, HashMap<String, Statement>),
     tokio::task::spawn_local,
@@ -263,6 +257,7 @@ manager!(
     tokio::time::delay_for
 );
 #[cfg(feature = "with-tokio")]
+#[cfg(not(any(feature = "with-ntex", features = "with-async-std")))]
 manager!(
     (Client, HashMap<String, Statement>),
     tokio::spawn,
@@ -271,12 +266,13 @@ manager!(
     tokio::time::delay_for
 );
 #[cfg(feature = "with-async-std")]
+#[cfg(not(any(feature = "with-tokio", features = "with-ntex")))]
 manager!(
     (Client, HashMap<String, Statement>),
     async_std::task::spawn,
     smol::Timer,
     std::time::Instant,
-    smol::Timer::after
+    smol::Timer::new
 );
 
 impl<Tls> fmt::Debug for PostgresManager<Tls>

@@ -60,7 +60,7 @@ impl Manager for TestPoolManager {
     }
 
     fn timeout<Fut: Future>(&self, fut: Fut, dur: Duration) -> ManagerTimeout<Fut, Self::Timeout> {
-        ManagerTimeout::new(fut, Timer::after(dur))
+        ManagerTimeout::new(fut, Timer::new(dur))
     }
 }
 

@@ -1,5 +1,5 @@
-use crate::{Manager, SharedManagedPool};
 use crate::pool_inner::PoolInner;
+use crate::{Manager, SharedManagedPool};
 
 // use a guard type to monitor the spawn result.
 // this is necessary as spawn process is a future that can be canceled.

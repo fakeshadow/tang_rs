@@ -6,7 +6,7 @@ edition = "2018"
 publish = false
 
 [dependencies.futures-util]
-version = "0.3.4"
+version = "0.3.5"
 
 [dependencies.redis]
 version = "0.16.0"
@@ -20,14 +20,14 @@ path = "../../redis_tang"
 git = "https://github.com/SergioBenitez/Rocket"
 
 [dependencies.serde]
-version = "1.0.101"
+version = "1.0.116"
 default-features = false
 
 [dependencies.serde_derive]
-version = "1.0.101"
+version = "1.0.116"
 
 [dependencies.serde_json]
-version = "1.0.40"
+version = "1.0.57"
 
 [dependencies.tokio-postgres]
 version = "0.5.5"

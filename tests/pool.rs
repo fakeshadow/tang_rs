@@ -1,10 +1,10 @@
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tang_rs::{Builder, Manager, ManagerFuture, ManagerTimeout, Pool, PoolRef};
-use tokio::time::{delay_for, interval, Delay, Interval};
+use tokio::time::{delay_for, interval, Delay};
 
 macro_rules! test_pool {
     ($valid_condition: expr, $broken_condition: expr) => {

@@ -186,7 +186,8 @@ where
     #[cold]
     fn wake_cold(&self, wait_key: NonZeroUsize) {
         let mut waiters = self.pool_inner.lock_waiter();
-
+        // # Safety: The future is dropped after we register the waker to list, before it acquire a
+        // connection. So we remove the wait_key here.
         let wait_key = unsafe { waiters.remove(wait_key) };
 
         if wait_key.is_none() {
@@ -214,7 +215,9 @@ where
                     Ok(conn) => {
                         let r = R::from_conn(conn, shared_pool);
 
-                        // remove self from waiter list
+                        // # Safety:
+                        // this unsafe would take a lock and release it when block is gone.
+                        // we remove the wait_key by the NonZeroUsize we get when inserting.
                         unsafe { pool_inner.lock_waiter().remove(wait_key) };
                         self.wait_key = None;
 
@@ -222,6 +225,8 @@ where
                     }
                     Err(_) => {
                         // insert or update wait key.
+                        // # Safety:
+                        // this same as Ok variant of this match.
                         let mut waiters = pool_inner.lock_waiter();
                         let opt = unsafe { waiters.get(wait_key) };
                         // We replace the waker if we are woken and have no waker in waiter list or have a new context which will not wake the old waker.

@@ -16,7 +16,7 @@ pub type ManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 ///
 /// Trait type                  runtime                 Type                        constructor
 /// <Manager::Timeout>          tokio                   tokio::time::Delay          tokio::time::delay_for
-///                             async-std               smol::Timer                 smol::Timer::after
+///                             async-std               smol::Timer                 smol::Timer::new
 ///
 /// <Manager::TimeoutError>     tokio                   ()
 ///                             async-std               std::time::Instant
