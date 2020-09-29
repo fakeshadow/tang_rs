@@ -6,7 +6,7 @@ edition = "2018"
 publish = false
 
 [dependencies.redis]
-version = "0.16.0"
+version = "0.17.0"
 default-features = false
 features = ["tokio-rt-core"]
 

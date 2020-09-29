@@ -9,10 +9,9 @@ publish = false
 actix-web = "3.0.2"
 futures-util = "0.3.5"
 once_cell = "1.4.1"
-redis = { version = "0.16.0", default-features = false, features = ["tokio-rt-core"] }
+redis = { version = "0.17.0", default-features = false, features = ["tokio-rt-core"] }
 redis_tang = { path = "../../redis_tang" }
 serde = { version = "1.0.116", default-features = false }
 serde_derive = "1.0.116"
-tokio = "0.2.22"
 tokio-postgres = "0.5.5"
 tokio_postgres_tang = { path = "../../tokio_postgres_tang" }
