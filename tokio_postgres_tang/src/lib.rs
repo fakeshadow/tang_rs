@@ -80,7 +80,7 @@
 
 use core::fmt;
 use core::future::Future;
-use core::ops::{Deref, DerefMut};
+use core::pin::Pin;
 use core::str::FromStr;
 use core::time::Duration;
 
@@ -88,6 +88,7 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 
 use futures_util::{future::join_all, TryFutureExt};
+use tokio_postgres::Client;
 
 #[cfg(feature = "with-async-std")]
 use async_postgres::{
@@ -204,7 +205,7 @@ macro_rules! manager {
                         sts.insert(alias, st);
                     }
 
-                    Ok(Client::new(c, sts))
+                    Ok((c, sts))
                 })
             }
 
@@ -212,11 +213,11 @@ macro_rules! manager {
                 &self,
                 c: &'a mut Self::Connection,
             ) -> ManagerFuture<'a, Result<(), Self::Error>> {
-                Box::pin(c.client.simple_query("").map_ok(|_| ()).err_into())
+                Box::pin(c.0.simple_query("").map_ok(|_| ()).err_into())
             }
 
             fn is_closed(&self, conn: &mut Self::Connection) -> bool {
-                conn.client.is_closed()
+                conn.0.is_closed()
             }
 
             #[cfg(not(feature = "with-ntex"))]
@@ -246,81 +247,10 @@ macro_rules! manager {
     };
 }
 
-pub struct Client {
-    client: tokio_postgres::Client,
-    statement: HashMap<String, Statement>,
-}
-
-impl Deref for Client {
-    type Target = tokio_postgres::Client;
-
-    fn deref(&self) -> &Self::Target {
-        &self.client
-    }
-}
-
-impl DerefMut for Client {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.client
-    }
-}
-
-const RW_LOCK_EXCEPTION_MSG: &str = "Failed to lock/write prepared statements";
-
-impl Client {
-    fn new(client: tokio_postgres::Client, statement: HashMap<String, Statement>) -> Self {
-        Self { client, statement }
-    }
-
-    /// get a cached prepare statement of this connection.
-    pub fn get_prepare_cached(&self, alias: &str) -> Option<&Statement> {
-        self.statement.get(alias)
-    }
-
-    /// Add new prepare statement to cache.
-    ///
-    /// Only statements with new alias as key in HashMap will be inserted.
-    ///
-    /// The statements with an already existed alias will be ignored.
-    ///
-    /// The format of statement is (<alias str> , <query str>, <tokio_postgres::types::Type>)
-    pub async fn prepare_cached(
-        &mut self,
-        statements: &[(&str, &str, &[Type])],
-    ) -> Result<&mut Self, PostgresPoolError> {
-        let cli = &self.client;
-        let sts = &mut self.statement;
-        let mut futures = Vec::with_capacity(statements.len());
-        for (alias, query, types) in statements
-            .iter()
-            .map(|(alias, query, types)| (*alias, *query, *types))
-        {
-            if !sts.contains_key(alias) {
-                let alias = alias.to_owned();
-                let f = cli.prepare_typed(query, types).map_ok(|st| (alias, st));
-                futures.push(f);
-            }
-        }
-
-        for result in join_all(futures).await.into_iter() {
-            let (alias, st) = result?;
-            sts.insert(alias, st);
-        }
-
-        Ok(self)
-    }
-
-    /// Clear the cached statements of this connection.
-    pub fn clear_prepare_cached(&mut self) -> &mut Self {
-        self.statement.clear();
-        self
-    }
-}
-
 #[cfg(feature = "with-ntex")]
 #[cfg(not(any(feature = "with-tokio", features = "with-async-std")))]
 manager!(
-    Client,
+    (Client, HashMap<String, Statement>),
     tokio::task::spawn_local,
     tokio::time::Delay,
     (),
@@ -329,7 +259,7 @@ manager!(
 #[cfg(feature = "with-tokio")]
 #[cfg(not(any(feature = "with-ntex", features = "with-async-std")))]
 manager!(
-    Client,
+    (Client, HashMap<String, Statement>),
     tokio::spawn,
     tokio::time::Delay,
     (),
@@ -338,7 +268,7 @@ manager!(
 #[cfg(feature = "with-async-std")]
 #[cfg(not(any(feature = "with-tokio", features = "with-ntex")))]
 manager!(
-    Client,
+    (Client, HashMap<String, Statement>),
     async_std::task::spawn,
     smol::Timer,
     std::time::Instant,
@@ -353,6 +283,73 @@ where
         f.debug_struct("PostgresConnectionManager")
             .field("config", &self.config)
             .finish()
+    }
+}
+
+#[cfg(not(feature = "with-ntex"))]
+type StatementFuture<'a, SELF> =
+    Pin<Box<dyn Future<Output = Result<&'a mut SELF, PostgresPoolError>> + Send + 'a>>;
+
+#[cfg(feature = "with-ntex")]
+type StatementFuture<'a, SELF> =
+    Pin<Box<dyn Future<Output = Result<&'a mut SELF, PostgresPoolError>> + 'a>>;
+
+/// helper trait for cached statement for this connection.
+/// Statements only work on the connection prepare them and not other connections in the pool.
+pub trait CacheStatement<'a> {
+    /// Only statements with new alias as key in HashMap will be inserted.
+    ///
+    /// The statements with an already existed alias will be ignored.
+    ///
+    /// The format of statement is (<alias str> , <query str>, <tokio_postgres::types::Type>)
+    fn insert_statements(
+        &'a mut self,
+        statements: &'a [(&'a str, &'a str, &'a [Type])],
+    ) -> StatementFuture<'a, Self>;
+
+    /// Clear the statements of this connection.
+    fn clear_statements(&mut self) -> &mut Self;
+}
+
+impl<'a, Tls> CacheStatement<'a> for PoolRef<'_, PostgresManager<Tls>>
+where
+    Tls: MakeTlsConnect<Socket> + Send + Sync + Clone + 'static,
+    Tls::Stream: Send,
+    Tls::TlsConnect: Send,
+    <Tls::TlsConnect as TlsConnect<Socket>>::Future: Send,
+{
+    fn insert_statements(
+        &'a mut self,
+        statements: &'a [(&'a str, &'a str, &'a [Type])],
+    ) -> StatementFuture<'a, Self> {
+        Box::pin(async move {
+            let (cli, sts) = &mut **self;
+
+            let mut futures = Vec::with_capacity(statements.len());
+            for (alias, query, types) in statements
+                .iter()
+                .map(|(alias, query, types)| (*alias, *query, *types))
+            {
+                if !sts.contains_key(alias) {
+                    let alias = alias.to_owned();
+                    let f = cli.prepare_typed(query, types).map_ok(|st| (alias, st));
+                    futures.push(f);
+                }
+            }
+
+            for result in join_all(futures).await.into_iter() {
+                let (alias, st) = result?;
+                sts.insert(alias, st);
+            }
+
+            Ok(self)
+        })
+    }
+
+    fn clear_statements(&mut self) -> &mut Self {
+        let (_cli, sts) = &mut **self;
+        sts.clear();
+        self
     }
 }
 
@@ -383,7 +380,7 @@ where
                 .get_manager()
                 .prepares
                 .write()
-                .expect(RW_LOCK_EXCEPTION_MSG);
+                .expect("Failed to lock/write prepared statements");
 
             for (alias, query, types) in statements.iter() {
                 prepares.insert((*alias).into(), (*query, *types).into());
@@ -397,7 +394,7 @@ where
         self.get_manager()
             .prepares
             .write()
-            .expect(RW_LOCK_EXCEPTION_MSG)
+            .expect("Failed to lock/write prepared statements")
             .clear();
         self
     }

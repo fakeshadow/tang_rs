@@ -65,17 +65,19 @@ async fn test(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResponse, 
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];
 
-    let conn = pool
+    let pool_ref = pool
         .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 
-    let st = conn
+    let (client, _statements) = &*pool_ref;
+
+    let st = client
         .prepare_typed("SELECT * FROM topics WHERE id=ANY($1)", &[Type::OID_ARRAY])
         .await
         .expect("Failed to prepare");
 
-    let (t, _u) = conn
+    let (t, _u) = client
         .query_raw(
             &st,
             [&ids as &(dyn ToSql + Sync)]
@@ -107,6 +109,8 @@ async fn test(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResponse, 
         )
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
+
+    drop(pool_ref);
 
     Ok(HttpResponse::Ok().json(&t))
 }

@@ -48,14 +48,16 @@ async fn main() -> async_std::io::Result<()> {
 
 async fn index(req: Request<State>) -> Result<Response, Error> {
     let state = req.state();
-    let conn = state.postgres_pool.get().await.unwrap();
+    let pool_ref = state.postgres_pool.get().await.unwrap();
+    let (client, _statement_map) = &*pool_ref;
 
-    let _ = conn.simple_query("").await.unwrap();
+    let _ = client.simple_query("").await.unwrap();
 
-    let mut conn = state.redis_pool.get().await.unwrap();
+    let mut pool_ref = state.redis_pool.get().await.unwrap();
+    let client = &mut *pool_ref;
 
     redis::cmd("PING")
-        .query_async::<_, ()>(&mut *client)
+        .query_async::<_, ()>(client)
         .await
         .unwrap();
 

@@ -78,14 +78,17 @@ async fn index(
     pool: State<'_, Pool<PostgresManager<tokio_postgres::NoTls>>>,
 ) -> Result<content::Json<String>, Debug<std::io::Error>> {
     // pool.get return the Conn and a reference of pool so that we can use the connection outside a closure.
-    let conn = pool.get().await.map_err(MyError::from)?;
+    let pool_ref = pool.get().await.map_err(MyError::from)?;
 
-    let st = conn
+    // deref or deref mut to get connection from pool_ref.
+    let (client, _statements) = &*pool_ref;
+
+    let st = client
         .prepare_typed("SELECT * FROM topics WHERE id=ANY($1)", &[Type::OID_ARRAY])
         .await
         .expect("Failed to prepare");
 
-    let (t, _u) = conn
+    let (t, _u) = client
         .query_raw(&st, [&IDS as &(dyn ToSql + Sync)].iter().map(|s| *s as _))
         .await
         .expect("Failed to query postgres")
@@ -112,6 +115,8 @@ async fn index(
         )
         .await
         .expect("Failed to query postgres");
+
+    drop(pool_ref); // drop the pool_ref when you finish use the pool. so that the connection can be put back to pool asap.
 
     Ok(content::Json(serde_json::to_string(&t).unwrap()))
 }
