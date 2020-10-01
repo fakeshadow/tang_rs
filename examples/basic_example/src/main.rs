@@ -6,17 +6,10 @@ use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use async_std::{
-    prelude::StreamExt,
-    stream::{interval, Interval},
-    task,
-};
+use async_std::task;
 use smol::Timer;
 
-use tang_rs::{
-    Builder, GarbageCollect, Manager, ManagerFuture, ManagerInterval, ManagerTimeout,
-    ScheduleReaping, SharedManagedPool,
-};
+use tang_rs::{Builder, Manager, ManagerFuture, ManagerTimeout};
 
 // our test pool would just generate usize from 0 as connections.
 struct TestPoolManager(AtomicUsize);
@@ -42,28 +35,6 @@ impl Debug for TestPoolError {
 impl From<Instant> for TestPoolError {
     fn from(_e: Instant) -> Self {
         TestPoolError
-    }
-}
-
-// We can impl some default pool behavior as trait to our TestPool like garbage collect and schedule recycle connections
-impl GarbageCollect for TestPoolManager {}
-
-impl ScheduleReaping for TestPoolManager {}
-
-// If we impl certain behaviors we have to impl this boilerplate too.
-// because different runtime use different interval :(
-impl ManagerInterval for TestPoolManager {
-    // the interval type runtime returns when constructed
-    type Interval = Interval;
-    // the interval tick return type
-    type Tick = Option<()>;
-
-    fn interval(dur: Duration) -> Self::Interval {
-        interval(dur)
-    }
-
-    fn tick(tick: &mut Self::Interval) -> ManagerFuture<'_, Self::Tick> {
-        Box::pin(tick.next())
     }
 }
 
@@ -104,12 +75,6 @@ impl Manager for TestPoolManager {
     // The duration is determined by `Builder::wait_timeout` or `Builder::connection_timeout`
     fn timeout<Fut: Future>(&self, fut: Fut, dur: Duration) -> ManagerTimeout<Fut, Self::Timeout> {
         ManagerTimeout::new(fut, Timer::after(dur))
-    }
-
-    // We have to attach the behaviors(GarbageCollect and ScheduleReaping traits) to this hook so that they can start with pool.
-    fn on_start(&self, shared_pool: &SharedManagedPool<Self>) {
-        self.schedule_reaping(shared_pool);
-        self.garbage_collect(shared_pool);
     }
 }
 

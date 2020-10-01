@@ -4,11 +4,10 @@
 //! * `with-async-std` - run on `smol` runtime.
 //! * `with-ntex` - run on `ntex` and `actix` runtime
 
-#[forbid(unsafe_code)]
-
-use std::fmt;
-use std::future::Future;
-use std::time::Duration;
+#![forbid(unsafe_code)]
+use core::fmt;
+use core::future::Future;
+use core::time::Duration;
 
 use redis::{aio::MultiplexedConnection, Client, IntoConnectionInfo, RedisError};
 

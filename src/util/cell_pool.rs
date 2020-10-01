@@ -1,10 +1,7 @@
-use core::cell::Cell;
+use core::cell::{Cell, UnsafeCell};
 use core::ops::{Deref, DerefMut};
 
 use std::collections::VecDeque;
-
-use crate::util::pool_error::PopError;
-use std::cell::UnsafeCell;
 
 /// `CellPool` is just a wrapper for `Cell/UnsafeCell` and would panic at runtime if concurrent access happen
 pub struct CellPool<T> {
@@ -58,7 +55,6 @@ impl<T> Drop for CellPoolGuard<'_, T> {
 }
 
 impl<T> CellPool<T> {
-    #[inline]
     fn guard(&self) -> CellPoolGuard<'_, T> {
         match self.state.replace(true) {
             true => panic!("Concurrent access to Cell pool is not allowed"),
@@ -70,42 +66,25 @@ impl<T> CellPool<T> {
         }
     }
 
-    #[inline]
     pub(crate) fn push_back(&self, value: T) {
-        let guard = self.guard();
-
-        guard.inner.conn.push_back(value);
+        self.guard().inner.conn.push_back(value);
     }
 
-    #[inline]
-    pub(crate) fn pop(&self) -> Result<T, PopError> {
-        let mut guard = self.guard();
-
-        match guard.inner.conn.pop_front() {
-            Some(conn) => Ok(conn),
-            None => {
-                if guard.inner.active < guard.inner.max_size {
-                    guard.inner.active += 1;
-                    Err(PopError::SpawnNow)
-                } else {
-                    Err(PopError::Empty)
-                }
-            }
-        }
+    pub(crate) fn pop(&self) -> Option<T> {
+        self.guard().inner.conn.pop_front()
     }
 
     // would return new active count
-    pub(crate) fn dec_active(&self, count: usize) -> usize {
+    pub(crate) fn dec_active(&self) -> usize {
         let mut guard = self.guard();
 
-        guard.inner.active -= count;
+        guard.inner.active -= 1;
 
         guard.inner.active
     }
 
-    pub(crate) fn inc_active(&self, count: usize) {
-        let mut guard = self.guard();
-        guard.inner.active += count;
+    pub(crate) fn try_inc_active(&self) -> bool {
+        self.guard().try_inc_active()
     }
 
     /// Returns items in queue, active ount in tuple
@@ -113,5 +92,16 @@ impl<T> CellPool<T> {
         let guard = self.guard();
 
         (guard.inner.conn.len(), guard.inner.active)
+    }
+}
+
+impl<T> CellPoolGuard<'_, T> {
+    fn try_inc_active(&mut self) -> bool {
+        if self.inner.active < self.inner.max_size {
+            self.inner.active += 1;
+            true
+        } else {
+            false
+        }
     }
 }

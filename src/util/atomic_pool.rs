@@ -2,19 +2,16 @@
 ///
 /// Changes:
 /// - remove `mark_bit` as we want to close/replace the queue from outside.
-/// - add `active_pending` field for tracking the active and pending item count of queue
+/// - add `active` field for tracking the active and pending item count of queue
 ///   (Both inside and outside of queue for a given moment)
-/// - add `shift` field for comparing `active_pending` with `cap`.
-/// - `one_lap` serves as the bitwise operator of both `head`/`tail` and `active_pending`.
+/// - `one_lap` serves as the bitwise operator of both `head`/`tail` and `active`.
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{self, AtomicUsize, Ordering};
 
-use std::thread;
+use std::thread::yield_now;
 
 use cache_padded::CachePadded;
-
-use crate::util::pool_error::{PopError, PushError};
 
 /// A slot in a queue.
 struct Slot<T> {
@@ -93,41 +90,16 @@ impl<T> AtomicPool<T> {
         }
     }
 
-    pub(crate) fn inc_active(&self, count: usize) {
-        self.active.fetch_add(count, Ordering::SeqCst);
-    }
-
-    pub(crate) fn dec_active(&self, count: usize) -> usize {
-        let active = self.active.fetch_sub(count, Ordering::SeqCst);
-        active - count
-    }
-
-    /// Attempts to push a returning item into the queue.
-    pub(crate) fn push_back(&self, value: T) {
-        // We assume the push will never fail.
-        let _ = self.push(value);
-    }
-
-    /// Attempts to pop an item from the queue.
-    ///
-    /// When we get an error for popping we would check the active_pending count and return
-    /// `PopError::SpawnNow` to notify the caller it's time to spawn new item for the queue.
-    ///
-    /// *. NOTE: Whoever take the ownership of `PopError::SpawnNow` is responsible for spawn the
-    /// new item and call `PoolInner::push_new` to insert the new item.
-    /// (or call `PoolInner::dec_pending` if it failed to do so.)
-    pub(crate) fn pop(&self) -> Result<T, PopError> {
-        self._pop().map_err(|e| self._inc_active(e))
-    }
-
-    fn _inc_active(&self, e: PopError) -> PopError {
+    // try to increment the active count of pool.
+    // when it returns true. The caller MUST spawn new connections and put it back to pool.
+    // or call `dec_active` to reset the active count.
+    // ToDo: use a guard type.
+    pub(crate) fn try_inc_active(&self) -> bool {
         let mut active = self.active.load(Ordering::Relaxed);
         loop {
-            // if we are at the cap then just break and return empty error.
             if active == self.cap {
-                break;
+                return false;
             } else {
-                // otherwise we increment pending count and try to write.
                 match self.active.compare_exchange_weak(
                     active,
                     active + 1,
@@ -136,7 +108,7 @@ impl<T> AtomicPool<T> {
                 ) {
                     Ok(_) => {
                         // write success we notify the caller it's time to spawn
-                        return PopError::SpawnNow;
+                        return true;
                     }
                     Err(acp) => {
                         active = acp;
@@ -144,11 +116,19 @@ impl<T> AtomicPool<T> {
                 }
             }
         }
-        e
+    }
+
+    pub(crate) fn dec_active(&self) -> usize {
+        self.active.fetch_sub(1, Ordering::SeqCst) - 1
+    }
+
+    pub(crate) fn push_back(&self, value: T) {
+        // We assume the push will never fail.
+        let _ = self.push(value);
     }
 
     /// Attempts to push an item into the queue.
-    fn push(&self, value: T) -> Result<(), PushError> {
+    fn push(&self, value: T) -> Result<(), ()> {
         let mut tail = self.tail.load(Ordering::Relaxed);
 
         loop {
@@ -198,20 +178,20 @@ impl<T> AtomicPool<T> {
                 // If the head lags one lap behind the tail as well...
                 if head.wrapping_add(self.one_lap) == tail {
                     // ...then the queue is full.
-                    return Err(PushError::Full);
+                    return Err(());
                 }
 
                 tail = self.tail.load(Ordering::Relaxed);
             } else {
                 // Yield because we need to wait for the stamp to get updated.
-                thread::yield_now();
+                yield_now();
                 tail = self.tail.load(Ordering::Relaxed);
             }
         }
     }
 
     /// Attempts to pop an item from the queue.
-    fn _pop(&self) -> Result<T, PopError> {
+    pub(crate) fn pop(&self) -> Option<T> {
         let mut head = self.head.load(Ordering::Relaxed);
 
         loop {
@@ -247,7 +227,7 @@ impl<T> AtomicPool<T> {
                         let value = unsafe { slot.value.get().read().assume_init() };
                         slot.stamp
                             .store(head.wrapping_add(self.one_lap), Ordering::Release);
-                        return Ok(value);
+                        return Some(value);
                     }
                     Err(h) => {
                         head = h;
@@ -258,13 +238,13 @@ impl<T> AtomicPool<T> {
 
                 // If the tail equals the head, that means the queue is empty.
                 if self.tail.load(Ordering::Relaxed) == head {
-                    return Err(PopError::Empty);
+                    return None;
                 }
 
                 head = self.head.load(Ordering::Relaxed);
             } else {
                 // Yield because we need to wait for the stamp to get updated.
-                thread::yield_now();
+                yield_now();
                 head = self.head.load(Ordering::Relaxed);
             }
         }

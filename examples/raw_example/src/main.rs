@@ -28,7 +28,6 @@ async fn main() -> std::io::Result<()> {
         .always_check(false) // if set true every connection will be checked before checkout.
         .idle_timeout(None) // set to None to ignore idle connection drop.
         .max_lifetime(Some(std::time::Duration::from_secs(30 * 60)))
-        .reaper_rate(std::time::Duration::from_secs(15)) // interval of idle and lifetime check.
         .min_idle(1)
         .max_size(12)
         .build(mgr)
@@ -40,17 +39,15 @@ async fn main() -> std::io::Result<()> {
 
     // run pool in closure. it's slightly faster than pool.get().
     let _rows = pool
-        .run(|mut pool_ref| async move {
-            let (client, statements) = &mut *pool_ref;
-
+        .run(|conn| async move {
             // use statement alias to call specific prepared statement.
-            let statement = statements
-                .get("topics")
+            let statement = conn
+                .get_prepare_cached("topics")
                 .expect("handle the option if you are not sure if a prepared statement exists");
 
             let ids = vec![1u32, 2, 3, 4, 5];
 
-            let rows = client.query(statement, &[&ids]).await?;
+            let rows = conn.query(statement, &[&ids]).await?;
 
             Ok::<_, PostgresPoolError>(rows)
             // infer type here so that u can use your custom error in the closure. you error type have to impl From<PostgresPoolError>.
@@ -67,11 +64,7 @@ async fn main() -> std::io::Result<()> {
         })?;
 
     // get pool reference and run it outside of a closure
-    let mut pool_ref = pool.get().await.expect("Failed to get pool ref");
-
-    // use deref or deref mut to get our client from pool_ref
-    let (client, statements) = &mut *pool_ref;
-
+    let mut conn = pool.get().await.expect("Failed to get pool ref");
     /*
         It's possible to insert new statement into statements from pool_ref.
         But be ware the statement will only work on this specific connection and not other connections in the pool.
@@ -85,35 +78,37 @@ async fn main() -> std::io::Result<()> {
         There is tang_rs::CacheStatement trait for PoolRef<PostgresManager<T>> to help you streamline this operation.
     */
 
-    let statement = match statements.get("statement_new") {
+    let statement = match conn.get_prepare_cached("statement_new") {
         Some(statement_new) => statement_new,
         None => {
-            let statement_new = client
-                .prepare_typed("SELECT * FROM topics WHERE id=ANY($1)", &[])
-                .await
-                .expect("Failed to prepare statement");
-            statements.insert("statement_new".into(), statement_new);
-            statements.get("statement_new").unwrap()
+            conn.prepare_cached(&[(
+                "statement_new",
+                "SELECT * FROM topics WHERE id=ANY($1)",
+                &[],
+            )])
+            .await
+            .unwrap();
+            conn.get_prepare_cached("statement_new").unwrap()
         }
     };
 
     let ids = vec![1u32, 2, 3, 4, 5];
 
-    let _rows = client
+    let _rows = conn
         .query(statement, &[&ids])
         .await
         .expect("Failed to get row");
 
     // we can take the connection out of pool ref if you prefer.
-    let conn = pool_ref.take_conn();
+    let taken = conn.take_conn();
 
-    assert_eq!(true, conn.is_some());
+    assert_eq!(true, taken.is_some());
 
     // the connection won't be return to pool unless we push it back manually.
-    pool_ref.push_conn(conn.unwrap());
+    conn.push_conn(taken.unwrap());
 
     // it's a good thing to drop the pool_ref right after you finished as the connection will be put back to pool when the pool_ref is dropped.
-    drop(pool_ref);
+    drop(conn);
 
     // build redis pool just like postgres pool
     let mgr = RedisManager::new("redis://127.0.0.1");
@@ -128,16 +123,12 @@ async fn main() -> std::io::Result<()> {
         .await
         .unwrap_or_else(|_| panic!("can't make redis pool"));
 
-    let mut pool_ref = pool_redis.get().await.expect("Failed to get redis pool");
-
-    let client = &mut *pool_ref;
+    let mut conn = pool_redis.get().await.expect("Failed to get redis pool");
 
     redis::cmd("PING")
-        .query_async::<_, ()>(client)
+        .query_async::<_, ()>(&mut *conn)
         .await
         .expect("Failed to ping redis pool");
-
-    drop(pool_ref);
 
     Ok(())
 }

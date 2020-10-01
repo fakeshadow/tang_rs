@@ -17,7 +17,6 @@ use crate::util::{
         linked_list_lock::{WakerListGuard, WakerListLock},
         WakerList,
     },
-    pool_error::PopError,
     spawn_guard::SpawnGuard,
 };
 use crate::{
@@ -44,7 +43,6 @@ macro_rules! pool_inner {
                 }
             }
 
-            #[inline]
             pub(crate) fn lock_waiter(&self) -> WakerListGuard<'_, WakerList> {
                 self.waiter.lock()
             }
@@ -70,8 +68,10 @@ impl PoolInnerState {
     }
 }
 
-impl<M: Manager> PoolInner<M> {
-    #[inline]
+impl<M> PoolInner<M>
+where
+    M: Manager,
+{
     pub(crate) async fn get_inner<'a, R>(
         &'a self,
         shared_pool: &'a SharedManagedPool<M>,
@@ -79,30 +79,23 @@ impl<M: Manager> PoolInner<M> {
     where
         R: PoolRefBehavior<'a, M> + Unpin,
     {
-        let res = self
-            .pool
-            .pop()
-            .map(|conn| R::from_conn(conn, shared_pool))
-            .map_err(|e| match e {
-                PopError::SpawnNow => Some(SpawnGuard::new(self)),
-                _ => None,
-            });
+        // ToDo: async-std/smol would not compile with direct match.
+        let res = self.pool.pop();
 
         match res {
-            Ok(r) => Ok(r),
-            Err(opt) => match opt {
-                Some(mut guard) => shared_pool.add().await.map(|conn| {
-                    guard.fulfilled();
-                    R::from_conn(conn, shared_pool)
-                }),
-                None => Ok(PoolInnerFuture {
-                    shared_pool,
-                    pool_inner: self,
-                    wait_key: None,
-                    _r: PhantomData,
+            Some(conn) => Ok(R::from_conn(conn, shared_pool)),
+            None => {
+                if self.try_inc_active() {
+                    SpawnGuard::new(shared_pool).add().await
+                } else {
+                    Ok(PoolInnerFuture {
+                        shared_pool,
+                        wait_key: None,
+                        _r: PhantomData,
+                    }
+                    .await)
                 }
-                .await),
-            },
+            }
         }
     }
 
@@ -114,11 +107,11 @@ impl<M: Manager> PoolInner<M> {
 
         loop {
             match self.pool.pop() {
-                Ok(conn) => {
+                Some(conn) => {
                     return R::from_conn(conn, shared_pool);
                 }
-                Err(e) => {
-                    if e.is_spawn_now() {
+                None => {
+                    if self.try_inc_active() {
                         shared_pool.spawn_idle();
                     }
                 }
@@ -129,14 +122,13 @@ impl<M: Manager> PoolInner<M> {
 
     // return true if we should spawn new.
     pub(crate) fn dec_active(&self) -> bool {
-        self.pool.dec_active(1) < self.min_idle()
+        self.pool.dec_active() < self.min_idle()
     }
 
-    pub(crate) fn inc_active(&self) {
-        self.pool.inc_active(1);
+    pub(crate) fn try_inc_active(&self) -> bool {
+        self.pool.try_inc_active()
     }
 
-    #[inline]
     pub(crate) fn push_back(&self, conn: Conn<M>) {
         self.pool.push_back(conn);
         self.lock_waiter().wake_one();
@@ -156,13 +148,12 @@ impl<M: Manager> PoolInner<M> {
     }
 }
 
-pub(crate) struct PoolInnerFuture<'a, M: Manager, R>
+pub(crate) struct PoolInnerFuture<'a, M, R>
 where
     M: Manager,
     R: PoolRefBehavior<'a, M>,
 {
     shared_pool: &'a SharedManagedPool<M>,
-    pool_inner: &'a PoolInner<M>,
     wait_key: Option<NonZeroUsize>,
     _r: PhantomData<R>,
 }
@@ -185,7 +176,7 @@ where
 {
     #[cold]
     fn wake_cold(&self, wait_key: NonZeroUsize) {
-        let mut waiters = self.pool_inner.lock_waiter();
+        let mut waiters = self.shared_pool.inner().lock_waiter();
         // # Safety: The future is dropped after we register the waker to list, before it acquire a
         // connection. So we remove the wait_key here.
         let wait_key = unsafe { waiters.remove(wait_key) };
@@ -205,15 +196,14 @@ where
     type Output = R;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let shared_pool = self.shared_pool;
-        let pool_inner = self.pool_inner;
+        let pool_inner = self.shared_pool.inner();
 
         // insert or update wait key.
         match self.wait_key {
             Some(wait_key) => {
                 match pool_inner.pool.pop() {
-                    Ok(conn) => {
-                        let r = R::from_conn(conn, shared_pool);
+                    Some(conn) => {
+                        let r = R::from_conn(conn, self.shared_pool);
 
                         // # Safety:
                         // this unsafe would take a lock and release it when block is gone.
@@ -223,10 +213,13 @@ where
 
                         return Poll::Ready(r);
                     }
-                    Err(_) => {
+                    None => {
+                        if pool_inner.try_inc_active() {
+                            self.shared_pool.spawn_idle();
+                        }
                         // insert or update wait key.
                         // # Safety:
-                        // this same as Ok variant of this match.
+                        // the same as Ok variant of this match.
                         let mut waiters = pool_inner.lock_waiter();
                         let opt = unsafe { waiters.get(wait_key) };
                         // We replace the waker if we are woken and have no waker in waiter list or have a new context which will not wake the old waker.

@@ -1,3 +1,15 @@
+(Oct 1, 2020)
+----------------------
+### Breaking
+- `tokio_postgres_tang::{CacheStatement, StatementFuture}` are removed (See Add part for alternative). 
+- `PoolRef<PostgresManager<T>>` would auto deref to `tokio_postgres::Client`. This means methods of `tokio_postgres::Client`
+like `prepare/query` can be called directly on `PoolRef` without manual deref.
+
+### Add
+- `PoolRef<PostgresManager<T>>::prepare_cached` `PoolRef<PostgresManager<T>>::get_prepare_cached`
+`PoolRef<PostgresManager<T>>::clear_prepare_cached` for connection based cache statement.
+
+
 (Jun 11, 2020)
 ----------------------
 ### Add

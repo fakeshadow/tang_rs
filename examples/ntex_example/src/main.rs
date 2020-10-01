@@ -65,19 +65,17 @@ async fn test(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResponse, 
         1u32, 11, 9, 20, 3, 5, 2, 6, 19, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 4,
     ];
 
-    let pool_ref = pool
+    let conn = pool
         .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 
-    let (client, _statements) = &*pool_ref;
-
-    let st = client
+    let st = conn
         .prepare_typed("SELECT * FROM topics WHERE id=ANY($1)", &[Type::OID_ARRAY])
         .await
         .expect("Failed to prepare");
 
-    let (t, _u) = client
+    let (t, _u) = conn
         .query_raw(
             &st,
             [&ids as &(dyn ToSql + Sync)]
@@ -110,8 +108,6 @@ async fn test(pool: Data<Pool<PostgresManager<NoTls>>>) -> Result<HttpResponse, 
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?;
 
-    drop(pool_ref);
-
     Ok(HttpResponse::Ok().json(&t))
 }
 
@@ -120,7 +116,6 @@ async fn test_redis(pool: Data<Pool<RedisManager>>) -> Result<HttpResponse, Erro
         .get()
         .await
         .map_err(|_| ErrorInternalServerError("lol"))?
-        .get_conn()
         .clone();
 
     redis::cmd("PING")

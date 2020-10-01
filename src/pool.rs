@@ -2,18 +2,15 @@ use core::fmt;
 use core::future::Future;
 use core::ops::{Deref, DerefMut};
 use core::time::Duration;
-#[cfg(not(feature = "no-send"))]
-use std::sync::{Arc as WrapPointer, Weak};
-use std::time::Instant;
+
 #[cfg(feature = "no-send")]
-use std::{
-    rc::{Rc as WrapPointer, Weak},
-    thread::{self, ThreadId},
-};
+use std::thread::{self, ThreadId};
+use std::time::Instant;
 
 use crate::builder::Builder;
 use crate::manager::Manager;
 use crate::pool_inner::{PoolInner, State};
+use crate::util::smart_pointer::{RefCounter, WeakRefCounter};
 use crate::util::spawn_guard::SpawnGuardOwned;
 
 pub struct Pool<M: Manager> {
@@ -141,7 +138,7 @@ impl<M: Manager> Pool<M> {
     pub(crate) fn new(builder: Builder, manager: M) -> Self {
         let pool = ManagedPool::new(builder, manager);
         Pool {
-            pool: WrapPointer::new(pool),
+            pool: RefCounter::new(pool),
             #[cfg(feature = "no-send")]
             id: thread::current().id(),
         }
@@ -254,7 +251,7 @@ impl<M: Manager> PoolRefBehavior<'_, M> for PoolRefOwned<M> {
     fn from_conn(conn: Conn<M>, shared_pool: &SharedManagedPool<M>) -> Self {
         Self {
             conn: Some(conn),
-            shared_pool: WrapPointer::downgrade(shared_pool),
+            shared_pool: RefCounter::downgrade(shared_pool),
         }
     }
 
@@ -263,25 +260,19 @@ impl<M: Manager> PoolRefBehavior<'_, M> for PoolRefOwned<M> {
     }
 }
 
+const CONN_TAKEN: &str = "Connection has already been taken";
+
 impl<M: Manager> Deref for PoolRef<'_, M> {
     type Target = M::Connection;
 
     fn deref(&self) -> &Self::Target {
-        &self
-            .conn
-            .as_ref()
-            .expect("Connection has already been taken")
-            .conn
+        &self.conn.as_ref().expect(CONN_TAKEN).conn
     }
 }
 
 impl<M: Manager> DerefMut for PoolRef<'_, M> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self
-            .conn
-            .as_mut()
-            .expect("Connection has already been taken")
-            .conn
+        &mut self.conn.as_mut().expect(CONN_TAKEN).conn
     }
 }
 
@@ -289,33 +280,23 @@ impl<M: Manager> Deref for PoolRefOwned<M> {
     type Target = M::Connection;
 
     fn deref(&self) -> &Self::Target {
-        &self
-            .conn
-            .as_ref()
-            .expect("Connection has already been taken")
-            .conn
+        &self.conn.as_ref().expect(CONN_TAKEN).conn
     }
 }
 
 impl<M: Manager> DerefMut for PoolRefOwned<M> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self
-            .conn
-            .as_mut()
-            .expect("Connection has already been taken")
-            .conn
+        &mut self.conn.as_mut().expect(CONN_TAKEN).conn
     }
 }
 
 impl<M: Manager> Drop for PoolRef<'_, M> {
-    #[inline]
     fn drop(&mut self) {
         self.shared_pool.drop_pool_ref(&mut self.conn);
     }
 }
 
 impl<M: Manager> Drop for PoolRefOwned<M> {
-    #[inline]
     fn drop(&mut self) {
         if let Some(shared_pool) = self.shared_pool.upgrade() {
             shared_pool.drop_pool_ref(&mut self.conn);
@@ -332,17 +313,16 @@ pub(crate) trait DropAndSpawn<M: Manager> {
 }
 
 impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
-    #[inline]
     fn drop_pool_ref(&self, conn: &mut Option<Conn<M>>) {
         let mut conn = match conn.take() {
             Some(conn) => conn,
             None => return self.spawn_drop(),
         };
 
-        let is_closed = self.manager.is_closed(&mut conn.conn);
-        let lifetime_check = self.lifetime_check(&conn);
+        let c = self.manager.is_closed(&mut conn.conn);
+        let b = self.beyond_lifetime(&conn);
 
-        if is_closed || lifetime_check {
+        if c || b {
             self.spawn_drop();
         } else {
             self.push_back(conn);
@@ -353,23 +333,17 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
     // Conn<M> should be dropped in place where spawn_drop() is used.
     #[cold]
     fn spawn_drop(&self) {
-        let should_spawn_new = self.dec_active();
+        let should_spawn = self.dec_active();
 
-        if should_spawn_new {
-            self.inc_active();
+        if should_spawn && self.try_inc_active() {
             self.spawn_idle();
         }
     }
 
+    #[cold]
     fn spawn_idle(&self) {
-        let mut spawn_guard = SpawnGuardOwned::new(self.clone());
-        self.manager.spawn(async move {
-            let shared_pool = spawn_guard.shared_pool();
-            if let Ok(conn) = shared_pool.add().await {
-                shared_pool.push_back(conn);
-                spawn_guard.fulfilled();
-            };
-        });
+        let spawn_guard = SpawnGuardOwned::new(self);
+        self.manager.spawn(spawn_guard.add());
     }
 }
 
@@ -390,7 +364,6 @@ impl<M: Manager> ManagedPool<M> {
         }
     }
 
-    #[inline]
     async fn _get<'a, R>(&'a self, shared_pool: &'a SharedManagedPool<M>) -> Result<R, M::Error>
     where
         R: PoolRefBehavior<'a, M> + Unpin,
@@ -429,13 +402,11 @@ impl<M: Manager> ManagedPool<M> {
         Ok(pool_ref)
     }
 
-    #[inline]
-    fn push_back(&self, conn: Conn<M>) {
+    pub(crate) fn push_back(&self, conn: Conn<M>) {
         self.inner.push_back(conn);
     }
 
-    #[inline]
-    fn lifetime_check(&self, conn: &Conn<M>) -> bool {
+    fn beyond_lifetime(&self, conn: &Conn<M>) -> bool {
         match self.builder.max_lifetime {
             Some(dur) => conn.birth.elapsed() > dur,
             None => false,
@@ -464,8 +435,9 @@ impl<M: Manager> ManagedPool<M> {
     async fn add_multi(&self, count: usize) -> Result<(), M::Error> {
         for _ in 0..count {
             let conn = self.add().await?;
-            self.inner.push_back(conn);
-            self.inner.inc_active();
+            if self.try_inc_active() {
+                self.push_back(conn);
+            }
         }
 
         Ok(())
@@ -488,8 +460,12 @@ impl<M: Manager> ManagedPool<M> {
         self.inner.dec_active()
     }
 
-    pub(crate) fn inc_active(&self) {
-        self.inner.inc_active();
+    pub(crate) fn try_inc_active(&self) -> bool {
+        self.inner.try_inc_active()
+    }
+
+    pub(crate) fn inner(&self) -> &PoolInner<M> {
+        &self.inner
     }
 
     fn connection_timeout(&self) -> Duration {
@@ -501,9 +477,9 @@ impl<M: Manager> ManagedPool<M> {
     }
 }
 
-pub type SharedManagedPool<M> = WrapPointer<ManagedPool<M>>;
+pub type SharedManagedPool<M> = RefCounter<ManagedPool<M>>;
 
-pub type WeakSharedManagedPool<M> = Weak<ManagedPool<M>>;
+pub type WeakSharedManagedPool<M> = WeakRefCounter<ManagedPool<M>>;
 
 pub struct Conn<M: Manager> {
     conn: M::Connection,
