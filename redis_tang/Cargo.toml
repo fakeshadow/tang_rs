@@ -1,6 +1,6 @@
 [package]
 name = "redis_tang"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["fakeshadow <24548779@qq.com>"]
 edition = "2018"
 description = "A light weight asynchronous connection pool for redis-rs"
@@ -15,30 +15,14 @@ path = "src/lib.rs"
 
 [features]
 default = ["with-tokio"]
-with-tokio = ["tang-rs", "redis/tokio-rt-core", "tokio/time"]
+with-tokio = ["tang-rs", "redis/tokio-comp", "tokio/time"]
 with-async-std = ["tang-rs", "async-std/unstable", "redis/async-std-comp", "smol"]
-with-ntex = ["tang-rs/no-send", "tokio/time", "tokio/rt-util", "redis/tokio-rt-core"]
+with-ntex = ["tang-rs/no-send", "tokio/time", "redis/tokio-comp"]
 
-[dependencies.async-std]
-version = "1.6.0"
-default-features = false
-optional = true
+[dependencies]
+async-std = { version = "1.5.0", default-features = false, optional = true }
+redis = { version = "0.19.0", default-features = false, optional = true }
+smol = { version = "1", optional = true }
+tokio = { version = "1", default-features = false, optional = true }
 
-[dependencies.redis]
-version = "0.16.0"
-default-features = false
-optional = true
-
-[dependencies.smol]
-version = "0.1.10"
-optional = true
-
-[dependencies.tang-rs]
-path = "../"
-default-features = false
-optional = true
-
-[dependencies.tokio]
-version = "0.2.20"
-default-features = false
-optional = true
+tang-rs = { version = "0.2.0", default-features = false, optional = true }

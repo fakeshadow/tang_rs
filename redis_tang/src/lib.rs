@@ -134,9 +134,9 @@ manager!(
     MultiplexedConnection,
     get_multiplexed_tokio_connection,
     tokio::task::spawn_local,
-    tokio::time::Delay,
+    tokio::time::Sleep,
     (),
-    tokio::time::delay_for
+    tokio::time::sleep
 );
 
 #[cfg(feature = "with-tokio")]
@@ -144,9 +144,9 @@ manager!(
     MultiplexedConnection,
     get_multiplexed_tokio_connection,
     tokio::spawn,
-    tokio::time::Delay,
+    tokio::time::Sleep,
     (),
-    tokio::time::delay_for
+    tokio::time::sleep
 );
 
 #[cfg(feature = "with-async-std")]

@@ -20,12 +20,12 @@ no-send = []
 
 [workspace]
 members = [
-    "examples/actix_web_example",
-    "examples/basic_example",
-    "examples/ntex_example",
-    "examples/rocket_example",
-    "examples/raw_example",
-    "examples/tide_example",
+#    "examples/actix_web_example",
+#    "examples/basic_example",
+#    "examples/ntex_example",
+#    "examples/rocket_example",
+#    "examples/raw_example",
+#    "examples/tide_example",
     "tokio_postgres_tang",
     "redis_tang",
     "mongodb_tang"
