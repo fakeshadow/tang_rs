@@ -18,9 +18,7 @@ use crate::util::linked_list::{
 #[cfg(not(feature = "no-send"))]
 use crate::util::spin_pool::{PoolAPI, SpinPool, SpinPoolGuard};
 use crate::{
-    builder::Builder,
-    manager::Manager,
-    pool::{IdleConn, PoolRefBehavior},
+    builder::Builder, connection::IdleConn, manager::Manager, pool::PoolRefBehavior,
     SharedManagedPool,
 };
 
@@ -128,7 +126,7 @@ pub(crate) struct PoolInner<M: Manager> {
     spawned: usize,
     marker: usize,
     pending: VecDeque<Pending>,
-    conn: VecDeque<IdleConn<M>>,
+    conn: VecDeque<IdleConn<M::Connection>>,
 }
 
 impl<M: Manager> PoolInner<M> {
@@ -192,17 +190,17 @@ impl<M: Manager> PoolInner<M> {
         self.conn.len()
     }
 
-    fn conn_mut(&mut self) -> &mut VecDeque<IdleConn<M>> {
+    fn conn_mut(&mut self) -> &mut VecDeque<IdleConn<M::Connection>> {
         &mut self.conn
     }
 
     #[inline]
-    fn pop_conn(&mut self) -> Option<IdleConn<M>> {
+    fn pop_conn(&mut self) -> Option<IdleConn<M::Connection>> {
         self.conn.pop_front()
     }
 
     #[inline]
-    fn push_conn(&mut self, conn: IdleConn<M>) {
+    fn push_conn(&mut self, conn: IdleConn<M::Connection>) {
         self.conn.push_back(conn);
     }
 
@@ -263,7 +261,7 @@ impl<M: Manager> PoolLock<M> {
     // return new pending count and marker as Option<(usize, usize)>.
     pub(crate) fn try_drop_conn<F>(&self, mut should_drop: F) -> Option<(usize, usize)>
     where
-        F: FnMut(&IdleConn<M>) -> bool,
+        F: FnMut(&IdleConn<M::Connection>) -> bool,
     {
         self.try_lock_inner().and_then(|mut inner| {
             let len = inner.conn_len();
@@ -292,7 +290,7 @@ impl<M: Manager> PoolLock<M> {
     }
 
     #[inline]
-    pub(crate) fn put_back(&self, conn: IdleConn<M>) {
+    pub(crate) fn put_back(&self, conn: IdleConn<M::Connection>) {
         let mut inner = self.lock_inner();
 
         let condition = inner.spawned() > self.max_size() || inner.marker() != conn.marker();
@@ -308,7 +306,7 @@ impl<M: Manager> PoolLock<M> {
         self.wake_one();
     }
 
-    pub(crate) fn put_new(&self, conn: IdleConn<M>) {
+    pub(crate) fn put_new(&self, conn: IdleConn<M::Connection>) {
         let mut inner = self.lock_inner();
 
         inner._dec_pending(1);

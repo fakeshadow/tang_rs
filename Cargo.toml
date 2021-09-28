@@ -32,7 +32,7 @@ members = [
 ]
 
 [dev-dependencies.async-std]
-version = "1.6.2"
+version = "1.10"
 features = ["attributes", "unstable"]
 
 [dev-dependencies.smol]

@@ -1,6 +1,7 @@
 use core::cell::{Cell, UnsafeCell};
+use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{spin_loop_hint, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::yield_now;
 
 /// Spin Pool is a spin lock for a pool of object.
@@ -87,10 +88,13 @@ impl<T: PoolAPI> SpinPool<T> {
     /// try to lock the pool immediately if the pool is unlocked and not empty.
     #[inline]
     pub fn try_lock_2(&self) -> Result<SpinPoolGuard<'_, T>, ()> {
-        if self.state.compare_and_swap(FREE, LOCKED, Ordering::Acquire) == FREE {
-            return Ok(self.guard());
+        match self
+            .state
+            .compare_exchange(FREE, LOCKED, Ordering::Acquire, Ordering::Acquire)
+        {
+            Ok(free) if free == FREE => Ok(self.guard()),
+            _ => Err(()),
         }
-        Err(())
     }
 
     /// spin wait for a lock and we want to back off after a certain amount of cycle.
@@ -128,7 +132,7 @@ impl Backoff {
     pub(super) fn snooze(&self) {
         if self.cycle.get() <= SPIN_LIMIT {
             for _ in 0..1 << self.cycle.get() {
-                spin_loop_hint();
+                spin_loop();
             }
         } else {
             return yield_now();

@@ -1,15 +1,13 @@
 use std::time::Instant;
 
-use crate::manager::Manager;
-
-pub struct Conn<M: Manager> {
-    conn: M::Connection,
+pub struct Conn<C> {
+    conn: C,
     marker: usize,
     birth: Instant,
 }
 
-impl<M: Manager> Conn<M> {
-    pub(crate) fn new(conn: M::Connection, marker: usize) -> Self {
+impl<C> Conn<C> {
+    pub(crate) fn new(conn: C, marker: usize) -> Self {
         Self {
             conn,
             marker,
@@ -17,22 +15,34 @@ impl<M: Manager> Conn<M> {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn marker(&self) -> usize {
         self.marker
     }
 
-    pub(crate) fn conn(&mut self) -> &mut M::Connection {
+    #[inline(always)]
+    pub(crate) fn conn_ref(&self) -> &C {
+        &self.conn
+    }
+
+    #[inline(always)]
+    pub(crate) fn conn_ref_mut(&mut self) -> &mut C {
         &mut self.conn
+    }
+
+    #[inline(always)]
+    pub(crate) fn into_conn(self) -> C {
+        self.conn
     }
 }
 
-pub struct IdleConn<M: Manager> {
-    conn: Conn<M>,
-    idle_start: Instant,
+pub struct IdleConn<C> {
+    conn: Conn<C>,
+    pub(crate) idle_start: Instant,
 }
 
-impl<M: Manager> IdleConn<M> {
-    fn new(conn: M::Connection, marker: usize) -> Self {
+impl<C> IdleConn<C> {
+    pub(crate) fn new(conn: C, marker: usize) -> Self {
         let now = Instant::now();
         IdleConn {
             conn: Conn {
@@ -44,27 +54,34 @@ impl<M: Manager> IdleConn<M> {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn marker(&self) -> usize {
         self.conn.marker()
     }
 
-    pub(crate) fn conn(&mut self) -> &mut M::Connection {
-        &mut self.conn.conn
+    #[inline(always)]
+    pub(crate) fn birth(&self) -> Instant {
+        self.conn.birth
+    }
+
+    #[inline(always)]
+    pub(crate) fn idle_start(&self) -> Instant {
+        self.idle_start
     }
 }
 
-impl<M: Manager> From<Conn<M>> for IdleConn<M> {
-    fn from(conn: Conn<M>) -> IdleConn<M> {
+impl<C> From<Conn<C>> for IdleConn<C> {
+    fn from(conn: Conn<C>) -> Self {
         let now = Instant::now();
-        IdleConn {
+        Self {
             conn,
             idle_start: now,
         }
     }
 }
 
-impl<M: Manager> From<IdleConn<M>> for Conn<M> {
-    fn from(conn: IdleConn<M>) -> Conn<M> {
+impl<C> From<IdleConn<C>> for Conn<C> {
+    fn from(conn: IdleConn<C>) -> Self {
         Conn {
             conn: conn.conn.conn,
             birth: conn.conn.birth,

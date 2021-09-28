@@ -109,7 +109,7 @@
 //!     let pool = builder.await.expect("fail to build pool");
 //!
 //!     // spawn 24 futures and pull connections from pool at the same time.
-//!     let (tx, rx) = async_std::sync::channel(100);
+//!     let (tx, rx) = async_std::channel::bounded(100);
 //!     for _i in 0..24 {
 //!         let pool = pool.clone();
 //!         let tx = tx.clone();
@@ -138,6 +138,7 @@ pub use pool::{Pool, PoolRef, PoolRefOwned, SharedManagedPool};
 pub use util::timeout::ManagerTimeout;
 
 mod builder;
+mod connection;
 mod manager;
 mod pool;
 mod pool_inner;
