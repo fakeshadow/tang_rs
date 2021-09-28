@@ -142,7 +142,7 @@ impl ListAPI for WakerList {
     }
 
     fn as_ref(&self) -> &WakerList {
-        &self
+        self
     }
 
     fn as_mut(&mut self) -> &mut WakerList {

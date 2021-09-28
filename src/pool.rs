@@ -17,64 +17,9 @@ use {
 };
 
 use crate::builder::Builder;
+use crate::connection::{Conn, IdleConn};
 use crate::manager::Manager;
 use crate::pool_inner::{PoolLock, State};
-
-pub struct Conn<M: Manager> {
-    conn: M::Connection,
-    marker: usize,
-    birth: Instant,
-}
-
-impl<M: Manager> Conn<M> {
-    pub(crate) fn marker(&self) -> usize {
-        self.marker
-    }
-}
-
-pub struct IdleConn<M: Manager> {
-    conn: Conn<M>,
-    idle_start: Instant,
-}
-
-impl<M: Manager> IdleConn<M> {
-    fn new(conn: M::Connection, marker: usize) -> Self {
-        let now = Instant::now();
-        IdleConn {
-            conn: Conn {
-                conn,
-                marker,
-                birth: now,
-            },
-            idle_start: now,
-        }
-    }
-
-    #[inline]
-    pub(crate) fn marker(&self) -> usize {
-        self.conn.marker
-    }
-}
-
-impl<M: Manager> From<Conn<M>> for IdleConn<M> {
-    fn from(conn: Conn<M>) -> IdleConn<M> {
-        let now = Instant::now();
-        IdleConn {
-            conn,
-            idle_start: now,
-        }
-    }
-}
-
-impl<M: Manager> From<IdleConn<M>> for Conn<M> {
-    fn from(conn: IdleConn<M>) -> Conn<M> {
-        Conn {
-            conn: conn.conn.conn,
-            birth: conn.conn.birth,
-            marker: conn.conn.marker,
-        }
-    }
-}
 
 pub struct ManagedPool<M: Manager> {
     builder: Builder,
@@ -235,13 +180,13 @@ impl<M: Manager> ManagedPool<M> {
     pub async fn reap_idle_conn(&self) -> Result<(), M::Error> {
         let now = Instant::now();
 
-        let pending_new = self.pool_lock.try_drop_conn(|conn| {
+        let pending_new = self.pool_lock.try_drop_conn(|idle_conn| {
             let mut should_drop = false;
             if let Some(timeout) = self.builder.idle_timeout {
-                should_drop |= now >= conn.idle_start + timeout;
+                should_drop |= now >= idle_conn.idle_start() + timeout;
             }
             if let Some(lifetime) = self.builder.max_lifetime {
-                should_drop |= now >= conn.conn.birth + lifetime;
+                should_drop |= now >= idle_conn.birth() + lifetime;
             }
             should_drop
         });
@@ -458,14 +403,14 @@ impl<M: Manager> Pool<M> {
 }
 
 pub struct PoolRef<'a, M: Manager> {
-    conn: Option<Conn<M>>,
+    conn: Option<Conn<M::Connection>>,
     shared_pool: &'a SharedManagedPool<M>,
     // marker is only used to store the marker of Conn<M> if it's been taken from pool
     marker: Option<usize>,
 }
 
 pub struct PoolRefOwned<M: Manager> {
-    conn: Option<Conn<M>>,
+    conn: Option<Conn<M::Connection>>,
     shared_pool: WeakSharedManagedPool<M>,
     marker: Option<usize>,
 }
@@ -479,8 +424,8 @@ impl<M: Manager> PoolRef<'_, M> {
     /// take the the ownership of connection from pool and it won't be pushed back to pool anymore.
     pub fn take_conn(&mut self) -> Option<M::Connection> {
         self.conn.take().map(|c| {
-            self.marker = Some(c.marker);
-            c.conn
+            self.marker = Some(c.marker());
+            c.into_conn()
         })
     }
 
@@ -495,11 +440,7 @@ impl<M: Manager> PoolRef<'_, M> {
             None => self.conn.as_ref().map(|c| c.marker()).unwrap(),
         };
 
-        self.conn = Some(Conn {
-            conn,
-            marker,
-            birth: Instant::now(),
-        });
+        self.conn = Some(Conn::new(conn, marker));
     }
 
     pub fn get_manager(&self) -> &M {
@@ -516,8 +457,8 @@ impl<M: Manager> PoolRefOwned<M> {
     /// take the the ownership of connection from pool and it won't be pushed back to pool anymore.
     pub fn take_conn(&mut self) -> Option<M::Connection> {
         self.conn.take().map(|c| {
-            self.marker = Some(c.marker);
-            c.conn
+            self.marker = Some(c.marker());
+            c.into_conn()
         })
     }
 
@@ -532,11 +473,7 @@ impl<M: Manager> PoolRefOwned<M> {
             None => self.conn.as_ref().map(|c| c.marker()).unwrap(),
         };
 
-        self.conn = Some(Conn {
-            conn,
-            marker,
-            birth: Instant::now(),
-        });
+        self.conn = Some(Conn::new(conn, marker));
     }
 }
 
@@ -544,13 +481,13 @@ pub(crate) trait PoolRefBehavior<'a, M: Manager>
 where
     Self: DerefMut<Target = M::Connection> + Sized,
 {
-    fn from_idle(conn: IdleConn<M>, shared_pool: &'a SharedManagedPool<M>) -> Self;
+    fn from_idle(conn: IdleConn<M::Connection>, shared_pool: &'a SharedManagedPool<M>) -> Self;
 
     fn take_drop(self) {}
 }
 
 impl<'re, M: Manager> PoolRefBehavior<'re, M> for PoolRef<'re, M> {
-    fn from_idle(conn: IdleConn<M>, shared_pool: &'re SharedManagedPool<M>) -> Self {
+    fn from_idle(conn: IdleConn<M::Connection>, shared_pool: &'re SharedManagedPool<M>) -> Self {
         Self {
             conn: Some(conn.into()),
             shared_pool,
@@ -564,7 +501,7 @@ impl<'re, M: Manager> PoolRefBehavior<'re, M> for PoolRef<'re, M> {
 }
 
 impl<M: Manager> PoolRefBehavior<'_, M> for PoolRefOwned<M> {
-    fn from_idle(conn: IdleConn<M>, shared_pool: &SharedManagedPool<M>) -> Self {
+    fn from_idle(conn: IdleConn<M::Connection>, shared_pool: &SharedManagedPool<M>) -> Self {
         Self {
             conn: Some(conn.into()),
             shared_pool: WrapPointer::downgrade(shared_pool),
@@ -581,21 +518,19 @@ impl<M: Manager> Deref for PoolRef<'_, M> {
     type Target = M::Connection;
 
     fn deref(&self) -> &Self::Target {
-        &self
-            .conn
+        self.conn
             .as_ref()
             .expect("Connection has already been taken")
-            .conn
+            .conn_ref()
     }
 }
 
 impl<M: Manager> DerefMut for PoolRef<'_, M> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self
-            .conn
+        self.conn
             .as_mut()
             .expect("Connection has already been taken")
-            .conn
+            .conn_ref_mut()
     }
 }
 
@@ -603,21 +538,19 @@ impl<M: Manager> Deref for PoolRefOwned<M> {
     type Target = M::Connection;
 
     fn deref(&self) -> &Self::Target {
-        &self
-            .conn
+        self.conn
             .as_ref()
             .expect("Connection has already been taken")
-            .conn
+            .conn_ref()
     }
 }
 
 impl<M: Manager> DerefMut for PoolRefOwned<M> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self
-            .conn
+        self.conn
             .as_mut()
             .expect("Connection has already been taken")
-            .conn
+            .conn_ref_mut()
     }
 }
 
@@ -638,14 +571,14 @@ impl<M: Manager> Drop for PoolRefOwned<M> {
 }
 
 trait DropAndSpawn<M: Manager> {
-    fn drop_pool_ref(&self, conn: &mut Option<Conn<M>>, marker: Option<usize>);
+    fn drop_pool_ref(&self, conn: &mut Option<Conn<M::Connection>>, marker: Option<usize>);
 
     fn spawn_drop(&self, marker: usize);
 }
 
 impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
     #[inline]
-    fn drop_pool_ref(&self, conn: &mut Option<Conn<M>>, marker: Option<usize>) {
+    fn drop_pool_ref(&self, conn: &mut Option<Conn<M::Connection>>, marker: Option<usize>) {
         if !self.is_running() {
             // marker here doesn't matter as should_spawn_new would reject new connection generation
             self.drop_conn(0, false);
@@ -661,16 +594,16 @@ impl<M: Manager> DropAndSpawn<M> for SharedManagedPool<M> {
             }
         };
 
-        let is_closed = self.manager.is_closed(&mut conn.conn);
+        let is_closed = self.manager.is_closed(conn.conn_ref_mut());
         if is_closed {
-            self.spawn_drop(conn.marker);
+            self.spawn_drop(conn.marker());
         } else {
             self.pool_lock.put_back(conn.into());
         };
     }
 
     // helper function to spawn drop connection and spawn new ones if needed.
-    // Conn<M> should be dropped in place where spawn_drop() is used.
+    // Conn<M::Connection> should be dropped in place where spawn_drop() is used.
     // ToDo: Will get unsolvable pending if the spawn is panic;
     #[cold]
     fn spawn_drop(&self, marker: usize) {
